@@ -739,14 +739,15 @@ function DiscardPile({ game }) {
   const humanHeldDiscard = isLocalTurn(game) && game.heldCard && game.source === "discard";
   const stack = Math.min(14, Math.max(1, Math.ceil(game.discard.length / 3)));
   const hidden = isPileHidden("discard", game);
-  const action = canHumanAct() && !game.heldCard ? "discard" : "";
+  const canUseDiscard = canHumanAct() && (!game.heldCard || game.source === "deck");
+  const action = canUseDiscard ? "discard" : "";
   if (humanHeldDiscard && !hidden) return h("div", { className: "pile" }, h(CardView, { card: game.heldCard, visible: true, extra: "selected pile-card stacked", action: "held-discard", stack }));
   if (hidden) {
     const underCard = game.discard.length > 1 ? game.discard[game.discard.length - 2] : null;
-    return h("div", { className: "pile" }, underCard ? h(CardView, { card: underCard, visible: true, extra: "pile-card stacked", action, stack: Math.max(1, stack - 1) }) : h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", disabled: !canHumanAct(), "aria-label": "Empty discard pile" }));
+    return h("div", { className: "pile" }, underCard ? h(CardView, { card: underCard, visible: true, extra: "pile-card stacked", action, stack: Math.max(1, stack - 1) }) : h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", disabled: !canUseDiscard, "aria-label": "Empty discard pile" }));
   }
   if (game.discard.length) return h("div", { className: "pile" }, h(CardView, { card: last(game.discard), visible: true, extra: "pile-card stacked", action, stack }));
-  return h("div", { className: "pile" }, h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", disabled: !canHumanAct(), "aria-label": "Empty discard pile" }));
+  return h("div", { className: "pile" }, h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", disabled: !canUseDiscard, "aria-label": "Empty discard pile" }));
 }
 
 function AnimationLayer({ animations }) {
