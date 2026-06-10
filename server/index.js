@@ -289,7 +289,6 @@ function drawDeck(game, playerIndex) {
   game.heldBy = playerIndex;
   game.source = "deck";
   rememberCard(game.players[playerIndex], game.heldCard);
-  pushAnimation(game, "deck", "deck", game.heldCard, { startFace: "down", endFace: "up", endVisibleTo: [game.players[playerIndex].id] });
   game.message = "Swap with one of your cards, or play it to the discard pile.";
 }
 
@@ -299,7 +298,6 @@ function drawDiscard(game, playerIndex) {
   game.heldBy = playerIndex;
   game.source = "discard";
   rememberCard(game.players[playerIndex], game.heldCard);
-  pushAnimation(game, "discard", "discard", game.heldCard, { startFace: "up", endFace: "up" });
   game.message = "Swap the discard card with one of your cards.";
 }
 

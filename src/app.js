@@ -298,6 +298,11 @@ function App() {
 }
 
 function handleRootClick(event) {
+  if (event.target.classList?.contains("modal-backdrop")) {
+    dismissModalByBackdrop();
+    render();
+    return;
+  }
   const actionTarget = event.target.closest?.("[data-action]");
   if (actionTarget && !actionTarget.disabled) {
     handleAction(actionTarget.dataset.action, actionTarget);
@@ -312,6 +317,23 @@ function handleRootClick(event) {
     return;
   }
   handleCardAction(action);
+}
+
+function dismissModalByBackdrop() {
+  if (!state.modal) return;
+  if (state.modal.type === "relay") {
+    cancelRelayConnection();
+    return;
+  }
+  if (state.modal.type === "confirmQuit") {
+    state.modal = null;
+    return;
+  }
+  if (state.modal.type === "end") {
+    state.modal = null;
+    return;
+  }
+  state.modal = null;
 }
 
 function handleRootInput(event) {
