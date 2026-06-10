@@ -548,7 +548,7 @@ function finishGame(game) {
   game.actionHoldUntil = Date.now() + 4000;
   game.players.forEach((player, playerIndex) => {
     player.cards.forEach((card, cardIndex) => {
-      if (card) pushAnimation(game, { playerIndex, cardIndex }, { playerIndex, cardIndex }, card, { startFace: "down", endFace: "up", duration: 1800 });
+      if (card) pushAnimation(game, { playerIndex, cardIndex }, { playerIndex, cardIndex }, card, { startFace: "down", endFace: "up", duration: 1800, hideStatic: false });
     });
   });
   setTimeout(() => {
@@ -709,6 +709,7 @@ function canSeeCard(game, localIndex, playerIndex, cardIndex, visibleIds) {
 }
 
 function animationView(animation, client) {
+  const now = Date.now();
   const startFace = visibleFaceFor(animation.startFace, animation.startVisibleTo, client.playerId);
   const endFace = visibleFaceFor(animation.endFace, animation.endVisibleTo, client.playerId);
   const expose = startFace === "up" || endFace === "up";
@@ -721,8 +722,10 @@ function animationView(animation, client) {
     red: expose && animation.card?.suit?.color === "red",
     rank: expose ? animation.card?.rank || "" : "",
     glyph: expose ? animation.card?.suit?.glyph || "" : "",
+    hideStatic: animation.hideStatic,
     duration: animation.duration,
     flipDelay: Math.max(200, Math.floor((animation.duration - 1500) / 2)),
+    remainingMs: Math.max(0, animation.expiresAt - now),
     expiresAt: animation.expiresAt
   };
 }
@@ -736,6 +739,7 @@ function visibleFaceFor(face, visibleTo, playerId) {
 function hiddenSlotsFor(game) {
   const slots = new Set();
   (game.animations || []).forEach((animation) => {
+    if (!animation.hideStatic) return;
     [animation.from, animation.to].forEach((target) => {
       if (target && typeof target === "object" && Number.isInteger(target.playerIndex) && Number.isInteger(target.cardIndex)) {
         slots.add(`${target.playerIndex}:${target.cardIndex}`);
@@ -748,6 +752,7 @@ function hiddenSlotsFor(game) {
 function hiddenPilesFor(game) {
   const piles = new Set();
   (game.animations || []).forEach((animation) => {
+    if (!animation.hideStatic) return;
     [animation.from, animation.to].forEach((target) => {
       if (target === "deck" || target === "discard") piles.add(target);
     });
@@ -934,9 +939,21 @@ function pushAnimation(game, from, to, card, options = {}) {
     endFace: options.endFace || options.startFace || "down",
     startVisibleTo: normalizeVisibleTo(options.startVisibleTo),
     endVisibleTo: normalizeVisibleTo(options.endVisibleTo),
+    hideStatic: options.hideStatic !== false,
     duration,
     expiresAt: Date.now() + duration
   });
+  scheduleAnimationSettle(game, duration);
+}
+
+function scheduleAnimationSettle(game, duration) {
+  clearTimeout(game.animationSettleTimer);
+  game.animationSettleTimer = setTimeout(() => {
+    const room = rooms.get(game.roomCode);
+    if (!room || room.game !== game) return;
+    clearExpiredAnimations(game, Date.now());
+    broadcastGame(room);
+  }, duration + 20);
 }
 
 function normalizeVisibleTo(value) {

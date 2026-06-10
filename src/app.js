@@ -191,6 +191,7 @@ function handleRelayMessage(message) {
     if (state.game.snapNotice && state.game.snapNotice.expiresAt !== previousSnap) bloop("bloop");
     state.screen = "game";
     if (state.modal?.type === "relay") state.modal = null;
+    if (state.game.phase === "complete" && state.game.leaveAt && state.modal?.type !== "end") state.modal = { type: "end" };
     startTicker();
   }
   if (message.type === "error") {
@@ -228,8 +229,10 @@ function hydrateAnimation(animation, game) {
   if (animation.from && animation.to && animation.mid) return animation;
   const from = positionForTarget(animation.fromTarget || animation.from || "deck", game);
   const to = positionForTarget(animation.toTarget || animation.to || "discard", game);
+  const localExpiresAt = Date.now() + Math.max(0, animation.remainingMs ?? animation.duration ?? MOVE_MS);
   return {
     ...animation,
+    expiresAt: localExpiresAt,
     from,
     to,
     mid: {
@@ -243,6 +246,7 @@ function refreshOnlineAnimationHides(game) {
   const slots = new Set();
   const piles = new Set();
   (game.animations || []).forEach((animation) => {
+    if (animation.hideStatic === false) return;
     [animation.fromTarget, animation.toTarget].forEach((target) => {
       if (target === "deck" || target === "discard") piles.add(target);
       if (target && typeof target === "object" && Number.isInteger(target.playerIndex) && Number.isInteger(target.cardIndex)) {
