@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#103a2a"/>
+  <rect x="118" y="92" width="180" height="260" rx="22" fill="#f5ead1" transform="rotate(-8 208 222)"/>
+  <rect x="214" y="152" width="180" height="260" rx="22" fill="#f5ead1" transform="rotate(8 304 282)"/>
+  <text x="256" y="300" text-anchor="middle" font-family="Georgia, serif" font-size="128" font-weight="700" fill="#b8322a">K</text>
+  <path d="M151 388c70 44 142 44 214 0" fill="none" stroke="#f6d678" stroke-width="20" stroke-linecap="round"/>
+</svg>

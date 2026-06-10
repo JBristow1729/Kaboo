@@ -1,0 +1,18 @@
+{
+  "name": "Kaboo",
+  "short_name": "Kaboo",
+  "description": "A fast memory card game, also known as Window.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#103a2a",
+  "theme_color": "#103a2a",
+  "orientation": "landscape-primary",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
