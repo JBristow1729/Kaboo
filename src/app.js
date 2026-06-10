@@ -29,6 +29,7 @@ const DEV_PUBLIC_LOBBIES = [
   { code: "9318", host: "Rook", players: 2 }
 ];
 const PUBLIC_LOBBIES = import.meta.env.DEV ? DEV_PUBLIC_LOBBIES : [];
+const RELAY_URL = import.meta.env.VITE_KABOO_RELAY_URL || "";
 
 const state = {
   screen: "title",
@@ -37,8 +38,14 @@ const state = {
   modal: null,
   toast: "",
   lobby: null,
+  publicLobbies: PUBLIC_LOBBIES,
   joinCode: ["", "", "", ""],
   game: null,
+  relay: {
+    ws: null,
+    status: RELAY_URL ? "idle" : "unconfigured",
+    clientId: null
+  },
   now: Date.now()
 };
 
@@ -62,6 +69,113 @@ function loadSettings() {
 
 function saveSettings() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.settings));
+}
+
+function connectRelay() {
+  if (!RELAY_URL) {
+    state.relay.status = "unconfigured";
+    return false;
+  }
+  if (state.relay.ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(state.relay.ws.readyState)) return true;
+  state.relay.status = "connecting";
+  const ws = new WebSocket(RELAY_URL);
+  state.relay.ws = ws;
+  ws.addEventListener("open", () => {
+    state.relay.status = "connected";
+    sendRelay("listLobbies");
+    render();
+  });
+  ws.addEventListener("message", (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    handleRelayMessage(message);
+  });
+  ws.addEventListener("close", () => {
+    if (state.relay.ws === ws) {
+      state.relay.status = "offline";
+      state.relay.ws = null;
+      render();
+    }
+  });
+  ws.addEventListener("error", () => {
+    state.relay.status = "offline";
+    toast("Multiplayer relay is unavailable.");
+    render();
+  });
+  return true;
+}
+
+function sendRelay(type, payload = {}) {
+  if (!connectRelay()) return false;
+  const ws = state.relay.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (ws?.readyState === WebSocket.CONNECTING) {
+      ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({ type, payload }));
+      }, { once: true });
+    }
+    toast("Connecting to multiplayer relay...");
+    return true;
+  }
+  ws.send(JSON.stringify({ type, payload }));
+  return true;
+}
+
+function sendGameIntent(action, payload = {}) {
+  return sendRelay("gameIntent", { action, ...payload });
+}
+
+function handleRelayMessage(message) {
+  if (message.type === "hello") {
+    state.relay.clientId = message.clientId;
+    state.publicLobbies = message.publicLobbies || [];
+  }
+  if (message.type === "lobbies") {
+    state.publicLobbies = message.publicLobbies || [];
+  }
+  if (message.type === "lobby") {
+    state.lobby = message.lobby;
+    state.screen = "lobby";
+    state.modal = null;
+  }
+  if (message.type === "game") {
+    state.game = hydrateOnlineGame(message.game);
+    state.screen = "game";
+    state.modal = null;
+    startTicker();
+  }
+  if (message.type === "error") {
+    state.modal = { type: "alert", title: "Multiplayer", message: message.message || "Something went wrong." };
+  }
+  render();
+}
+
+function hydrateOnlineGame(game) {
+  if (!game) return null;
+  return {
+    ...game,
+    visibleToHuman: new Map((game.visibleToHuman || []).map((cardId) => [cardId, Date.now() + 3600000])),
+    readyPlayers: new Set(game.readyPlayers || []),
+    hiddenSlots: new Set(game.hiddenSlots || []),
+    hiddenPiles: new Set(game.hiddenPiles || []),
+    snappedCardIds: new Set(game.snappedCardIds || []),
+    finalTurns: game.finalTurns ? new Set(game.finalTurns) : null,
+    players: (game.players || []).map((player) => ({ ...player, memory: new Set(player.memory || []) })),
+    animations: game.animations || [],
+    selection: game.selection || []
+  };
+}
+
+function isOnlineLobby() {
+  return Boolean(state.lobby?.online);
+}
+
+function isOnlineGame(game = state.game) {
+  return Boolean(game?.online);
 }
 
 function render(options = {}) {
@@ -275,6 +389,8 @@ function AlertDialog({ title, message }) {
 function LobbyScreen() {
   const lobby = state.lobby || createLobby();
   const allReady = lobby.players.length > 1 && lobby.players.every((p) => p.ready);
+  const localPlayer = lobby.players.find((p) => p.local);
+  const isHost = !lobby.online || lobby.isHost;
   return h("section", { className: "screen panel-screen" },
     h("div", { className: "panel" },
       h("div", { className: "panel-header" },
@@ -283,7 +399,7 @@ function LobbyScreen() {
           h("div", { className: "code" }, lobby.code)
         ),
         h("label", { className: "checkbox-row" },
-          h("input", { type: "checkbox", "data-action": "toggle-public", checked: lobby.public, onChange: () => {} }),
+          h("input", { type: "checkbox", "data-action": "toggle-public", checked: lobby.public, disabled: !isHost, onChange: () => {} }),
           " Public"
         )
       ),
@@ -293,8 +409,8 @@ function LobbyScreen() {
       h("div", { className: "panel-footer", style: { marginTop: 20, marginBottom: 0 } },
         h("span", null, allReady ? "The table is ready." : "Waiting for players to ready up."),
         h("div", { className: "dialog-actions", style: { margin: 0 } },
-          h("button", { className: "ghost", "data-action": "toggle-ready" }, lobby.players.find((p) => p.local)?.ready ? "Unready" : "Ready"),
-          h("button", { "data-action": "start-lobby-game", disabled: !allReady }, "Start Game")
+          h("button", { className: "ghost", "data-action": "toggle-ready" }, localPlayer?.ready ? "Unready" : "Ready"),
+          h("button", { "data-action": "start-lobby-game", disabled: !allReady || !isHost }, "Start Game")
         )
       )
     ),
@@ -306,7 +422,7 @@ function LobbySlot({ player, index }) {
   if (!player) {
     return h("div", { className: "player-slot empty" },
       h("span", null, `Seat ${index + 1}`),
-      h("button", { "data-action": "add-cpu" }, "Add CPU")
+      (!state.lobby?.online || state.lobby?.isHost) ? h("button", { "data-action": "add-cpu" }, "Add CPU") : null
     );
   }
   return h("div", { className: "player-slot" },
@@ -314,12 +430,13 @@ function LobbySlot({ player, index }) {
       h("strong", null, player.name),
       h("span", { className: "pill" }, player.ready ? "Ready" : "Waiting")
     ),
-    player.ai ? h("button", { className: "eject", "data-action": "eject-cpu", "data-index": index, "aria-label": `Eject ${player.name}` }, "Eject") : null
+    player.ai && (!state.lobby?.online || state.lobby?.isHost) ? h("button", { className: "eject", "data-action": "eject-cpu", "data-index": index, "data-player-id": player.id || "", "aria-label": `Eject ${player.name}` }, "Eject") : null
   );
 }
 
 function JoinLobbyScreen() {
   const code = state.joinCode.join("");
+  const publicLobbies = state.publicLobbies || [];
   return h("section", { className: "screen panel-screen" },
     h("div", { className: "panel" },
       h("h2", null, "Join Lobby"),
@@ -336,8 +453,8 @@ function JoinLobbyScreen() {
         h("section", null,
           h("span", { className: "small-label" }, "Public"),
           h("div", { className: "public-list", style: { marginTop: 10 } },
-            PUBLIC_LOBBIES.length
-              ? PUBLIC_LOBBIES.map((lobby) => h("div", { className: "public-row", key: lobby.code },
+            publicLobbies.length
+              ? publicLobbies.map((lobby) => h("div", { className: "public-row", key: lobby.code },
                   h("div", null, h("strong", null, lobby.host), h("br"), h("span", null, `${lobby.players}/8 players`)),
                   h("button", { "data-action": "join-public", "data-code": lobby.code }, "Join")
                 ))
@@ -1033,15 +1150,25 @@ function handleAction(action, target) {
   if (action === "open-options") state.modal = { type: "options" };
   if (action === "save-options") saveOptions();
   if (action === "single") state.modal = { type: "ai" };
-  if (action === "multi") go("multiplayer");
+  if (action === "multi") {
+    connectRelay();
+    go("multiplayer");
+  }
   if (action === "host") hostLobby();
-  if (action === "join") go("join");
+  if (action === "join") {
+    connectRelay();
+    sendRelay("listLobbies");
+    go("join");
+  }
   if (action === "back") back();
   if (action === "toggle-public") togglePublic();
   if (action === "toggle-ready") toggleReady();
   if (action === "add-cpu") addCpuToLobby();
-  if (action === "eject-cpu") ejectCpuFromLobby(Number(target.dataset.index));
-  if (action === "start-lobby-game") startGame(state.lobby.players);
+  if (action === "eject-cpu") ejectCpuFromLobby(Number(target.dataset.index), target.dataset.playerId);
+  if (action === "start-lobby-game") {
+    if (isOnlineLobby()) sendRelay("startGame");
+    else startGame(state.lobby.players);
+  }
   if (action === "start-singleplayer") {
     const count = Number(document.querySelector("#ai-count").value);
     startGame(makePlayers(count));
@@ -1051,14 +1178,21 @@ function handleAction(action, target) {
   if (action === "draw-deck") drawDeck();
   if (action === "ready-game") markPlayerReady(state.game?.localPlayerIndex);
   if (action === "discard-empty") {
-    if (state.game?.heldCard && state.game.source === "deck" && isLocalTurn(state.game)) playHeldCard();
+    if (state.game?.heldCard && state.game.source === "deck" && isLocalTurn(state.game)) {
+      if (isOnlineGame(state.game)) sendGameIntent("playHeld");
+      else playHeldCard();
+    }
     else toast("No discard card yet.");
   }
   if (action === "kaboo") callKaboo();
   if (action === "cancel-action") cancelAction(Boolean(state.game?.pendingAction));
   if (action === "confirm-king-swap") confirmKingSwap();
-  if (action === "play-again") startGame(state.game.players.map((p, index) => ({ name: p.name, ai: p.ai, local: index === state.game.localPlayerIndex, ready: true, wins: p.wins })));
+  if (action === "play-again") {
+    if (isOnlineGame()) sendRelay("playAgain");
+    else startGame(state.game.players.map((p, index) => ({ name: p.name, ai: p.ai, local: index === state.game.localPlayerIndex, ready: true, wins: p.wins })));
+  }
   if (action === "leave-table") {
+    if (isOnlineGame()) sendRelay("leaveRoom");
     state.modal = null;
     state.game = null;
     go("title", true);
@@ -1071,7 +1205,10 @@ function handleCardAction(action) {
   const game = state.game;
   if (isAnimating(game)) return;
   if (action === "discard") {
-    if (game.heldCard && game.source === "deck" && isLocalTurn(game)) playHeldCard();
+    if (game.heldCard && game.source === "deck" && isLocalTurn(game)) {
+      if (isOnlineGame(game)) sendGameIntent("playHeld");
+      else playHeldCard();
+    }
     return render();
   }
   if (!action.startsWith("table-card")) return;
@@ -1079,6 +1216,19 @@ function handleCardAction(action) {
   const playerIndex = Number(playerIndexText);
   const cardIndex = Number(cardIndexText);
   bloop("bloop");
+  if (isOnlineGame(game)) {
+    if (game.pendingAction?.type === "snapGive") {
+      if (playerIndex === game.localPlayerIndex) sendGameIntent("giveSnapCard", { cardIndex });
+      else toast("Choose one of your own cards to give.");
+    } else if (game.pendingAction && isLocalTurn(game)) {
+      sendGameIntent("cardAction", { targetPlayerIndex: playerIndex, cardIndex });
+    } else if (game.heldCard && isLocalTurn(game) && isLocalPlayerIndex(playerIndex, game)) {
+      sendGameIntent("swapHeld", { cardIndex });
+    } else if (game.discard.length) {
+      sendGameIntent("snap", { ownerIndex: playerIndex, cardIndex });
+    }
+    return render();
+  }
   if (game.pendingAction?.type === "snapGive") {
     if (game.pendingAction.snappingPlayerIndex !== game.localPlayerIndex) return;
     if (playerIndex !== game.localPlayerIndex) return toast("Choose one of your own cards to give.");
@@ -1113,11 +1263,27 @@ function go(screen, replace = false) {
 }
 
 function back() {
+  if ((state.screen === "lobby" || state.screen === "game") && (isOnlineLobby() || isOnlineGame())) {
+    sendRelay("leaveRoom");
+    state.lobby = null;
+    state.game = null;
+  }
   state.screen = state.previous.pop() || "title";
 }
 
 function hostLobby() {
   if (!requireUsername()) return;
+  if (RELAY_URL) {
+    sendRelay("createLobby", { username: state.settings.username });
+    return;
+  } else {
+    state.modal = {
+      type: "alert",
+      title: "Relay not configured",
+      message: "Set VITE_KABOO_RELAY_URL in Netlify to enable online multiplayer."
+    };
+    return;
+  }
   state.lobby = createLobby();
   go("lobby");
 }
@@ -1133,6 +1299,10 @@ function createLobby() {
 }
 
 function addCpuToLobby() {
+  if (isOnlineLobby()) {
+    sendRelay("addCpu");
+    return;
+  }
   const lobby = state.lobby;
   if (!lobby || lobby.players.length >= 8) return;
   const cpuNames = ["Scout", "Pip", "Dot", "Finn", "Bea", "Kit", "Nia"];
@@ -1141,23 +1311,41 @@ function addCpuToLobby() {
   lobby.players.push({ name, ready: true, ai: true, wins: 0 });
 }
 
-function ejectCpuFromLobby(index) {
+function ejectCpuFromLobby(index, playerId = "") {
+  if (isOnlineLobby()) {
+    sendRelay("ejectCpu", { playerId });
+    return;
+  }
   const lobby = state.lobby;
   if (!lobby || !lobby.players[index]?.ai) return;
   lobby.players.splice(index, 1);
 }
 
 function togglePublic() {
+  if (isOnlineLobby()) {
+    sendRelay("setPublic", { public: !state.lobby.public });
+    return;
+  }
   state.lobby.public = !state.lobby.public;
 }
 
 function toggleReady() {
+  if (isOnlineLobby()) {
+    const local = state.lobby.players.find((player) => player.local);
+    sendRelay("setReady", { ready: !local?.ready });
+    return;
+  }
   const local = state.lobby.players.find((player) => player.local);
   if (local) local.ready = !local.ready;
 }
 
 function joinPrivate() {
   const code = state.joinCode.join("");
+  if (!requireUsername()) return;
+  if (RELAY_URL) {
+    sendRelay("joinLobby", { code, username: state.settings.username });
+    return;
+  }
   if (PUBLIC_LOBBIES.some((l) => l.code === code) || state.lobby?.code === code) {
     joinPublic(code);
   } else {
@@ -1167,6 +1355,10 @@ function joinPrivate() {
 
 function joinPublic(code) {
   if (!requireUsername()) return;
+  if (RELAY_URL) {
+    sendRelay("joinLobby", { code, username: state.settings.username });
+    return;
+  }
   const lobby = PUBLIC_LOBBIES.find((item) => item.code === code);
   if (!lobby) {
     state.modal = { type: "alert", title: "Lobby not found", message: "That public game is no longer available." };
@@ -1270,6 +1462,10 @@ function areAllPlayersReady(game = state.game) {
 
 function markPlayerReady(playerIndex, game = state.game) {
   if (!isReadyPhase(game)) return;
+  if (isOnlineGame(game)) {
+    sendGameIntent("readyGame");
+    return;
+  }
   game.readyPlayers.add(playerIndex);
   if (areAllPlayersReady(game)) beginTurns(game);
 }
@@ -1303,6 +1499,10 @@ function shuffle(cards) {
 function drawDeck() {
   const game = state.game;
   if (!canHumanAct()) return;
+  if (isOnlineGame(game)) {
+    sendGameIntent("drawDeck");
+    return;
+  }
   if (game.heldCard) return toast("Play or swap your held card first.");
   if (!ensureDeck()) return toast("No cards left to draw.");
   resetTurnTimer(game);
@@ -1314,6 +1514,10 @@ function drawDeck() {
 function drawDiscard() {
   const game = state.game;
   if (!canHumanAct()) return;
+  if (isOnlineGame(game)) {
+    sendGameIntent("drawDiscard");
+    return;
+  }
   if (!game.discard.length) return;
   resetTurnTimer(game);
   game.heldCard = game.discard.pop();
@@ -1444,6 +1648,10 @@ function handlePendingAction(playerIndex, cardIndex) {
 
 function confirmKingSwap() {
   const game = state.game;
+  if (isOnlineGame(game)) {
+    sendGameIntent("confirmKingSwap");
+    return;
+  }
   const picks = game.pendingAction?.picks || [];
   clearVisiblePicks(picks, game);
   game.pendingAction = null;
@@ -1453,6 +1661,10 @@ function confirmKingSwap() {
 
 function cancelAction(advance = false) {
   const game = state.game;
+  if (isOnlineGame(game)) {
+    sendGameIntent("cancelAction", { advance });
+    return;
+  }
   resetTurnTimer(game);
   if (game.pendingAction?.type === "kingChoice" || game.pendingAction?.type === "kingSwap") {
     clearVisiblePicks(game.pendingAction.picks || [], game);
@@ -1623,6 +1835,10 @@ function giveSnapCard(giveIndex) {
 
 function callKaboo() {
   const game = state.game;
+  if (isOnlineGame(game)) {
+    sendGameIntent("kaboo");
+    return;
+  }
   if ((!canHumanAct() && !game.players[game.currentPlayer]?.ai) || game.kabooBy !== null) return;
   game.kabooBy = game.currentPlayer;
   game.kabooHold = true;
@@ -1940,6 +2156,7 @@ function playTimerWarning(game = state.game) {
 function isCardVisible(game, playerIndex, cardIndex) {
   const card = game.players[playerIndex].cards[cardIndex];
   if (!card) return false;
+  if (isOnlineGame(game) && card.rank && !card.hidden) return true;
   if (state.modal?.type === "end") return true;
   if (game.phase === "revealing" || game.phase === "complete") return true;
   if (isReadyPhase(game) && isLocalPlayerIndex(playerIndex, game) && !game.readyPlayers.has(playerIndex) && cardIndex >= 2) return true;
@@ -1963,6 +2180,10 @@ function startTicker() {
       if (game.snapNotice?.expiresAt <= Date.now()) {
         game.snapNotice = null;
         needsRender = true;
+      }
+      if (isOnlineGame(game)) {
+        if (needsRender) render();
+        return;
       }
       if (game.phase === "revealing" || game.phase === "complete") {
         const hadAnimations = game.animations.length > 0;

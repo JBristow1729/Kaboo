@@ -29,25 +29,78 @@ Use these Netlify settings:
 
 The app is static, so it deploys cleanly to Netlify without server functions.
 
-## Multiplayer Relay
+## Multiplayer Deployment
 
-Netlify does not provide long-lived WebSocket hosting from ordinary static deploys/functions, so real internet multiplayer needs a separate relay service. The clean deployment shape is:
+Multiplayer uses two deploys:
 
-1. Deploy this PWA to Netlify.
-2. Deploy a small WebSocket relay to a platform that supports persistent sockets, such as Fly.io, Railway, Render, Cloudflare Workers Durable Objects, or PartyKit.
-3. Store lobby state on the relay: lobby code, public/private flag, seats, ready states, host id, and authoritative game events.
-4. Use client-sent events only as intents: `createLobby`, `joinLobby`, `ready`, `startGame`, `draw`, `swap`, `play`, `snap`, `kaboo`, `playAgain`, `leave`.
-5. Have the relay validate turn order, snap windows, card visibility, deck order, and scoring. Do not trust the browser for multiplayer authority.
-6. Add a Netlify environment variable for the relay URL if you introduce a build-time bundler later, or serve a small `/config.js` next to the app that assigns `window.KABOO_RELAY_URL = "wss://your-relay.example"`.
+1. Netlify hosts the static PWA.
+2. Render hosts the WebSocket relay in `server/`.
 
-Essential multiplayer details still worth adding before a public launch:
+### 1. Deploy the Relay on Render
 
-- Reconnection and host migration if the host disconnects.
-- A server-side profanity/moderation pass for usernames.
-- Anti-cheat visibility rules, with per-player private messages for peeks and drawn cards.
-- Server timestamps for snap tie-breaking, with the owner winning exact ties.
-- Lobby expiry and rate limiting so public lobbies do not pile up.
-- A short tutorial/rules panel for first-time players.
+Create a new Render Web Service from this GitHub repo.
+
+Use these settings:
+
+- Root directory: `server`
+- Runtime: `Node`
+- Build command: `npm install`
+- Start command: `npm start`
+- Health check path: `/healthz`
+
+Add this environment variable after you know your Netlify site URL:
+
+```text
+ALLOWED_ORIGIN=https://your-netlify-site.netlify.app
+```
+
+For the first relay deploy, you can temporarily use:
+
+```text
+ALLOWED_ORIGIN=*
+```
+
+After Render deploys, note the service URL. If Render gives:
+
+```text
+https://kaboo-relay.onrender.com
+```
+
+then the WebSocket URL is:
+
+```text
+wss://kaboo-relay.onrender.com/ws
+```
+
+### 2. Connect Netlify to the Relay
+
+In Netlify, open the Kaboo site and add this environment variable:
+
+```text
+VITE_KABOO_RELAY_URL=wss://kaboo-relay.onrender.com/ws
+```
+
+Then trigger a new Netlify deploy. Vite bakes `VITE_` variables into the browser bundle during build, so a redeploy is required after changing this value.
+
+### 3. Play Online
+
+1. Open the Netlify URL.
+2. Set a username in Options.
+3. Click Multiplayer.
+4. Host Game creates a relay lobby and 4-digit code.
+5. Toggle Public if you want the lobby to appear in Join Game.
+6. Friends open the same Netlify URL and join by code or public lobby.
+7. Ready up and the host starts the game.
+
+The relay owns lobby state, deck order, turn order, card visibility, ready states, Kaboo protection, snap attempts, action-card choices, scoring, and AI seats. Each browser receives a filtered view so the local player is always at the bottom and hidden cards stay hidden.
+
+Important future hardening before a wider public launch:
+
+- Durable persistence if a Render instance restarts.
+- Reconnection into an in-progress seat after refresh.
+- Rate limiting for lobby creation and snap attempts.
+- Server-side timestamps for near-simultaneous snap tie-breaks.
+- More exhaustive automated multiplayer tests.
 
 ## Card Art
 
