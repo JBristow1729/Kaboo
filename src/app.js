@@ -184,13 +184,24 @@ function handleRelayMessage(message) {
     if (state.modal?.type === "relay") state.modal = null;
   }
   if (message.type === "game") {
+    const previousKaboo = state.game?.kabooNotice?.expiresAt || 0;
+    const previousSnap = state.game?.snapNotice?.expiresAt || 0;
     state.game = hydrateOnlineGame(message.game);
+    if (state.game.kabooNotice && state.game.kabooNotice.expiresAt !== previousKaboo) bloop("streamer");
+    if (state.game.snapNotice && state.game.snapNotice.expiresAt !== previousSnap) bloop("bloop");
     state.screen = "game";
     if (state.modal?.type === "relay") state.modal = null;
     startTicker();
   }
   if (message.type === "error") {
     state.modal = { type: "alert", title: "Multiplayer", message: message.message || "Something went wrong." };
+  }
+  if (message.type === "tableClosed") {
+    state.game = null;
+    state.lobby = null;
+    state.screen = "title";
+    state.previous = [];
+    state.modal = { type: "alert", title: "Table Closed", message: message.message || "All players have left the table." };
   }
   render();
 }
@@ -226,6 +237,21 @@ function hydrateAnimation(animation, game) {
       y: (from.y + to.y) / 2
     }
   };
+}
+
+function refreshOnlineAnimationHides(game) {
+  const slots = new Set();
+  const piles = new Set();
+  (game.animations || []).forEach((animation) => {
+    [animation.fromTarget, animation.toTarget].forEach((target) => {
+      if (target === "deck" || target === "discard") piles.add(target);
+      if (target && typeof target === "object" && Number.isInteger(target.playerIndex) && Number.isInteger(target.cardIndex)) {
+        slots.add(`${target.playerIndex}:${target.cardIndex}`);
+      }
+    });
+  });
+  game.hiddenSlots = slots;
+  game.hiddenPiles = piles;
 }
 
 function isOnlineLobby() {
@@ -669,7 +695,7 @@ function Sidebar({ game, readyPhase }) {
       game.players.map((p, i) => h("div", { className: "chalk-row", key: i },
         h("span", null, i === game.currentPlayer ? "★" : ""),
         h("span", null, p.name),
-        h("span", null, readyPhase ? (game.readyPlayers.has(i) ? "Ready" : "Waiting") : ("|".repeat(p.wins || 0) || "-"))
+        h("span", null, p.left ? "Left" : (readyPhase ? (game.readyPlayers.has(i) ? "Ready" : "Waiting") : ("|".repeat(p.wins || 0) || "-")))
       ))
     ),
     h("div", null, h(StatusLog, { lines: game.log.slice(-7) }))
@@ -844,7 +870,7 @@ function TableButton({ game }) {
     const ready = game.readyPlayers.has(game.localPlayerIndex);
     return h("div", { className: "table-button-row" }, h("button", { "data-action": "ready-game", disabled: ready }, "Ready"));
   }
-  if (!isLocalTurn(game) || game.kabooBy !== null || game.kabooHold || game.pendingAction || game.heldCard || game.source || game.phase !== "playing") return null;
+  if (!isLocalTurn(game) || game.actionHoldUntil > Date.now() || game.kabooBy !== null || game.kabooHold || game.pendingAction || game.heldCard || game.source || game.phase !== "playing") return null;
   return h("div", { className: "table-button-row" }, h("button", { className: "kaboo danger", "data-action": "kaboo" }, "KABOO"));
 }
 
@@ -2312,6 +2338,7 @@ function randomIndex(array) {
 function canHumanAct() {
   const game = state.game;
   if (!game || !isLocalTurn(game)) return false;
+  if (game.actionHoldUntil > Date.now()) return false;
   if (isAnimating(game)) return false;
   if (isReadyPhase(game) || game.phase === "revealing" || game.phase === "complete") return false;
   return true;
@@ -2361,6 +2388,12 @@ function startTicker() {
         needsRender = true;
       }
       if (isOnlineGame(game)) {
+        const hadAnimations = game.animations.length > 0;
+        game.animations = game.animations.filter((animation) => animation.expiresAt > Date.now());
+        if (hadAnimations) {
+          refreshOnlineAnimationHides(game);
+          needsRender = true;
+        }
         if (needsRender) render();
         return;
       }
