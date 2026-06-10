@@ -64,6 +64,7 @@ let pointerActive = false;
 let pendingRender = false;
 let renderVersion = 0;
 let root = null;
+let endDialogTimer = null;
 
 function loadSettings() {
   const fallback = { username: "", sfx: 68, music: 0 };
@@ -191,7 +192,7 @@ function handleRelayMessage(message) {
     if (state.game.snapNotice && state.game.snapNotice.expiresAt !== previousSnap) bloop("bloop");
     state.screen = "game";
     if (state.modal?.type === "relay") state.modal = null;
-    if (state.game.phase === "complete" && state.game.leaveAt && state.modal?.type !== "end") state.modal = { type: "end" };
+    scheduleOnlineEndDialog(state.game);
     startTicker();
   }
   if (message.type === "error") {
@@ -202,9 +203,28 @@ function handleRelayMessage(message) {
     state.lobby = null;
     state.screen = "title";
     state.previous = [];
+    clearTimeout(endDialogTimer);
+    endDialogTimer = null;
     state.modal = { type: "alert", title: "Table Closed", message: message.message || "All players have left the table." };
   }
   render();
+}
+
+function scheduleOnlineEndDialog(game) {
+  if (!isOnlineGame(game)) return;
+  if (game.phase !== "complete" || !game.leaveAt) {
+    clearTimeout(endDialogTimer);
+    endDialogTimer = null;
+    return;
+  }
+  if (state.modal?.type === "end" || endDialogTimer) return;
+  endDialogTimer = setTimeout(() => {
+    endDialogTimer = null;
+    if (state.game?.online && state.game.phase === "complete" && state.modal?.type !== "end") {
+      state.modal = { type: "end" };
+      render();
+    }
+  }, 4000);
 }
 
 function hydrateOnlineGame(game) {
@@ -246,7 +266,6 @@ function refreshOnlineAnimationHides(game) {
   const slots = new Set();
   const piles = new Set();
   (game.animations || []).forEach((animation) => {
-    if (animation.hideStatic === false) return;
     [animation.fromTarget, animation.toTarget].forEach((target) => {
       if (target === "deck" || target === "discard") piles.add(target);
       if (target && typeof target === "object" && Number.isInteger(target.playerIndex) && Number.isInteger(target.cardIndex)) {
@@ -1101,7 +1120,7 @@ function renderTurnTitle(game, player, readyPhase) {
   if (game.kabooNotice && game.kabooNotice.expiresAt > Date.now()) return `${escapeHtml(game.players[game.kabooNotice.playerIndex].name)} called Kaboo!`;
   if (game.snapNotice && game.snapNotice.expiresAt > Date.now()) return `${escapeHtml(game.players[game.snapNotice.playerIndex].name)} Snapped!`;
   if (game.phase === "complete" && game.winnerIndex !== undefined) return `${escapeHtml(game.players[game.winnerIndex].name)} ${game.players[game.winnerIndex].name === "You" ? "win" : "wins"}!`;
-  if (game.phase === "revealing") return "Revealing hands";
+  if (game.phase === "revealing") return "Revealing cards";
   if (readyPhase) return "Memorize your cards";
   return isLocalTurn(game) ? "Your turn" : `${escapeHtml(player.name)}'s turn`;
 }

@@ -238,6 +238,10 @@ function handleGameIntent(room, game, playerIndex, intent) {
     return;
   }
   if (game.phase !== "playing") return;
+  if (game.pendingAction?.type === "snapGive") {
+    if (intent.action === "giveSnapCard" && game.pendingAction.snappingPlayerIndex === playerIndex) return giveSnapCard(game, Number(intent.cardIndex));
+    return;
+  }
   if (intent.action === "snap") return attemptSnap(game, playerIndex, Number(intent.ownerIndex), Number(intent.cardIndex));
   if (game.currentPlayer !== playerIndex) return;
   resetTurnTimer(game);
@@ -248,7 +252,6 @@ function handleGameIntent(room, game, playerIndex, intent) {
   if (intent.action === "cardAction") return handlePendingCard(room, game, playerIndex, Number(intent.targetPlayerIndex), Number(intent.cardIndex));
   if (intent.action === "cancelAction") return cancelAction(game, true);
   if (intent.action === "confirmKingSwap") return confirmKingSwap(game);
-  if (intent.action === "giveSnapCard") return giveSnapCard(game, Number(intent.cardIndex));
   if (intent.action === "kaboo") return callKaboo(game, playerIndex);
 }
 
@@ -264,6 +267,7 @@ function tickGame(room, now) {
   }
   if (game.phase !== "playing") return;
   if (game.actionHoldUntil && now < game.actionHoldUntil) return;
+  if (game.pendingAction?.type === "snapGive") return;
   const current = game.players[game.currentPlayer];
   if (current?.ai && !game.heldCard && !game.pendingAction && now + 16000 >= game.turnEndsAt) {
     aiTurn(game);
@@ -536,6 +540,7 @@ function scheduleEndTurn(game, delay = 0) {
 }
 
 function finishGame(game) {
+  const room = rooms.get(game.roomCode);
   const scores = game.players.map((p, i) => ({ i, score: handScore(p.cards) })).sort((a, b) => a.score - b.score);
   const lowest = scores[0].score;
   const winners = scores.filter((item) => item.score === lowest);
@@ -544,13 +549,14 @@ function finishGame(game) {
   });
   game.winnerIndex = winners[0].i;
   game.phase = "revealing";
-  game.message = "Revealing hands.";
-  game.actionHoldUntil = Date.now() + 4000;
+  game.message = "Revealing cards.";
+  game.actionHoldUntil = Date.now() + 5800;
   game.players.forEach((player, playerIndex) => {
     player.cards.forEach((card, cardIndex) => {
-      if (card) pushAnimation(game, { playerIndex, cardIndex }, { playerIndex, cardIndex }, card, { startFace: "down", endFace: "up", duration: 1800, hideStatic: false });
+      if (card) pushAnimation(game, { playerIndex, cardIndex }, { playerIndex, cardIndex }, card, { startFace: "down", endFace: "up", duration: 1800 });
     });
   });
+  if (room) broadcastGame(room);
   setTimeout(() => {
     const room = rooms.get(game.roomCode);
     if (!room || room.game !== game) return;
@@ -558,7 +564,7 @@ function finishGame(game) {
     game.message = winners.length > 1 ? "The game is a draw." : `${game.players[winners[0].i].name} Wins!`;
     game.leaveAt = Date.now() + 30000;
     broadcastGame(room);
-  }, 4000);
+  }, 5800);
 }
 
 function timeoutTurn(game) {
@@ -722,7 +728,6 @@ function animationView(animation, client) {
     red: expose && animation.card?.suit?.color === "red",
     rank: expose ? animation.card?.rank || "" : "",
     glyph: expose ? animation.card?.suit?.glyph || "" : "",
-    hideStatic: animation.hideStatic,
     duration: animation.duration,
     flipDelay: Math.max(200, Math.floor((animation.duration - 1500) / 2)),
     remainingMs: Math.max(0, animation.expiresAt - now),
@@ -739,7 +744,6 @@ function visibleFaceFor(face, visibleTo, playerId) {
 function hiddenSlotsFor(game) {
   const slots = new Set();
   (game.animations || []).forEach((animation) => {
-    if (!animation.hideStatic) return;
     [animation.from, animation.to].forEach((target) => {
       if (target && typeof target === "object" && Number.isInteger(target.playerIndex) && Number.isInteger(target.cardIndex)) {
         slots.add(`${target.playerIndex}:${target.cardIndex}`);
@@ -752,7 +756,6 @@ function hiddenSlotsFor(game) {
 function hiddenPilesFor(game) {
   const piles = new Set();
   (game.animations || []).forEach((animation) => {
-    if (!animation.hideStatic) return;
     [animation.from, animation.to].forEach((target) => {
       if (target === "deck" || target === "discard") piles.add(target);
     });
@@ -939,7 +942,6 @@ function pushAnimation(game, from, to, card, options = {}) {
     endFace: options.endFace || options.startFace || "down",
     startVisibleTo: normalizeVisibleTo(options.startVisibleTo),
     endVisibleTo: normalizeVisibleTo(options.endVisibleTo),
-    hideStatic: options.hideStatic !== false,
     duration,
     expiresAt: Date.now() + duration
   });
