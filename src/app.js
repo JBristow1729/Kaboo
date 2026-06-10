@@ -7,6 +7,8 @@ const h = React.createElement;
 const STORAGE_KEY = "kaboo-settings-v1";
 const TURN_SECONDS = 20;
 const READY_SECONDS = 30;
+const RELAY_CONNECT_TIMEOUT_MS = 60000;
+const RELAY_RETRY_MS = 4500;
 const MOVE_MS = 3200;
 const ANIMATION_CUTOFF_MS = 1000;
 const SNAP_ANIMATION_CUTOFF_MS = 800;
@@ -44,7 +46,12 @@ const state = {
   relay: {
     ws: null,
     status: RELAY_URL ? "idle" : "unconfigured",
-    clientId: null
+    clientId: null,
+    pending: [],
+    attemptStartedAt: 0,
+    retryTimer: null,
+    timeoutTimer: null,
+    lastError: ""
   },
   now: Date.now()
 };
@@ -74,14 +81,34 @@ function saveSettings() {
 function connectRelay() {
   if (!RELAY_URL) {
     state.relay.status = "unconfigured";
+    state.relay.lastError = "VITE_KABOO_RELAY_URL is not configured.";
     return false;
   }
   if (state.relay.ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(state.relay.ws.readyState)) return true;
+  if (!state.relay.attemptStartedAt || ["idle", "offline", "failed", "unconfigured"].includes(state.relay.status)) {
+    state.relay.attemptStartedAt = Date.now();
+    clearTimeout(state.relay.timeoutTimer);
+    state.relay.timeoutTimer = setTimeout(() => {
+      if (state.relay.status === "connected") return;
+      state.relay.status = "failed";
+      state.relay.lastError = `Could not connect within ${Math.round(RELAY_CONNECT_TIMEOUT_MS / 1000)} seconds. Check the relay URL and Render origin settings.`;
+      clearTimeout(state.relay.retryTimer);
+      state.relay.retryTimer = null;
+      render();
+    }, RELAY_CONNECT_TIMEOUT_MS);
+  }
   state.relay.status = "connecting";
   const ws = new WebSocket(RELAY_URL);
   state.relay.ws = ws;
   ws.addEventListener("open", () => {
     state.relay.status = "connected";
+    state.relay.lastError = "";
+    clearTimeout(state.relay.retryTimer);
+    clearTimeout(state.relay.timeoutTimer);
+    state.relay.retryTimer = null;
+    state.relay.timeoutTimer = null;
+    const pending = state.relay.pending.splice(0);
+    pending.forEach((item) => ws.send(JSON.stringify(item)));
     sendRelay("listLobbies");
     render();
   });
@@ -96,29 +123,43 @@ function connectRelay() {
   });
   ws.addEventListener("close", () => {
     if (state.relay.ws === ws) {
-      state.relay.status = "offline";
       state.relay.ws = null;
+      if (Date.now() - state.relay.attemptStartedAt < RELAY_CONNECT_TIMEOUT_MS) {
+        state.relay.status = "waking";
+        scheduleRelayRetry();
+      } else {
+        state.relay.status = "failed";
+        state.relay.lastError = "The relay did not accept a WebSocket connection in time.";
+      }
       render();
     }
   });
   ws.addEventListener("error", () => {
-    state.relay.status = "offline";
-    toast("Multiplayer relay is unavailable.");
+    state.relay.lastError = "Relay connection failed. Render may still be waking up.";
     render();
   });
   return true;
+}
+
+function scheduleRelayRetry() {
+  if (state.relay.retryTimer || state.relay.status === "connected") return;
+  state.relay.retryTimer = setTimeout(() => {
+    state.relay.retryTimer = null;
+    if (state.relay.status !== "connected" && Date.now() - state.relay.attemptStartedAt < RELAY_CONNECT_TIMEOUT_MS) {
+      connectRelay();
+      render();
+    }
+  }, RELAY_RETRY_MS);
 }
 
 function sendRelay(type, payload = {}) {
   if (!connectRelay()) return false;
   const ws = state.relay.ws;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    if (ws?.readyState === WebSocket.CONNECTING) {
-      ws.addEventListener("open", () => {
-        ws.send(JSON.stringify({ type, payload }));
-      }, { once: true });
+    state.relay.pending.push({ type, payload });
+    if (state.relay.status === "connecting" || state.relay.status === "waking") {
+      state.modal = { type: "relay" };
     }
-    toast("Connecting to multiplayer relay...");
     return true;
   }
   ws.send(JSON.stringify({ type, payload }));
@@ -140,12 +181,12 @@ function handleRelayMessage(message) {
   if (message.type === "lobby") {
     state.lobby = message.lobby;
     state.screen = "lobby";
-    state.modal = null;
+    if (state.modal?.type === "relay") state.modal = null;
   }
   if (message.type === "game") {
     state.game = hydrateOnlineGame(message.game);
     state.screen = "game";
-    state.modal = null;
+    if (state.modal?.type === "relay") state.modal = null;
     startTicker();
   }
   if (message.type === "error") {
@@ -178,6 +219,47 @@ function isOnlineGame(game = state.game) {
   return Boolean(game?.online);
 }
 
+function resetRelayAttempt(clearPending = false) {
+  clearTimeout(state.relay.retryTimer);
+  clearTimeout(state.relay.timeoutTimer);
+  state.relay.retryTimer = null;
+  state.relay.timeoutTimer = null;
+  state.relay.attemptStartedAt = 0;
+  state.relay.lastError = "";
+  if (clearPending) state.relay.pending = [];
+  if (state.relay.ws) {
+    const ws = state.relay.ws;
+    state.relay.ws = null;
+    try {
+      ws.close();
+    } catch {
+      // No-op: closing a half-open socket can throw in old browsers.
+    }
+  }
+}
+
+function retryRelayConnection() {
+  resetRelayAttempt(false);
+  state.relay.status = RELAY_URL ? "idle" : "unconfigured";
+  state.modal = { type: "relay" };
+  connectRelay();
+}
+
+function cancelRelayConnection() {
+  resetRelayAttempt(true);
+  state.relay.status = RELAY_URL ? "idle" : "unconfigured";
+  state.modal = null;
+}
+
+function quitGame() {
+  if (isOnlineGame()) sendRelay("leaveRoom");
+  state.modal = null;
+  state.game = null;
+  state.lobby = null;
+  cancelQueuedAiActions();
+  go("title", true);
+}
+
 function render(options = {}) {
   if (pointerActive && !options.force) {
     pendingRender = true;
@@ -192,6 +274,7 @@ function App() {
   return h("main", { className: "app", onClick: handleRootClick, onInput: handleRootInput },
     state.toast ? h("div", { className: "toast" }, state.toast) : null,
     h(RulesButton),
+    h(GameQuitButton),
     renderScreen(),
     renderModal()
   );
@@ -269,6 +352,8 @@ function renderModal() {
   if (state.modal.type === "options") return h(OptionsDialog);
   if (state.modal.type === "ai") return h(AiDialog);
   if (state.modal.type === "rules") return h(RulesDialog);
+  if (state.modal.type === "relay") return h(RelayDialog);
+  if (state.modal.type === "confirmQuit") return h(ConfirmQuitDialog);
   if (state.modal.type === "alert") return h(AlertDialog, { title: state.modal.title, message: state.modal.message });
   if (state.modal.type === "end") return h(EndDialog);
   return null;
@@ -276,6 +361,11 @@ function renderModal() {
 
 function RulesButton() {
   return h("button", { className: `rules-button ${state.screen === "game" ? "in-game" : ""}`, "data-action": "rules" }, "Rules");
+}
+
+function GameQuitButton() {
+  if (state.screen !== "game") return null;
+  return h("button", { className: "bottom-left quit-button danger", "data-action": "confirm-quit" }, "Quit");
 }
 
 function MenuScreen({ title, primary, secondary, primaryAction, secondaryAction }) {
@@ -382,6 +472,49 @@ function AlertDialog({ title, message }) {
       h("h2", null, title),
       h("p", null, message),
       h("div", { className: "dialog-actions" }, h("button", { "data-action": action }, "OK"))
+    )
+  );
+}
+
+function RelayDialog() {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+  const elapsed = state.relay.attemptStartedAt ? now - state.relay.attemptStartedAt : 0;
+  const remaining = Math.max(0, Math.ceil((RELAY_CONNECT_TIMEOUT_MS - elapsed) / 1000));
+  const failed = state.relay.status === "failed";
+  const title = failed ? "Relay Not Connected" : "Waking Multiplayer Relay";
+  const message = failed
+    ? state.relay.lastError || "The multiplayer relay could not be reached."
+    : `Trying to connect for up to ${remaining}s. Free Render services can take a short while to wake after sleeping.`;
+  return h("div", { className: "modal-backdrop" },
+    h("section", { className: "dialog relay-dialog" },
+      h("h2", null, title),
+      h("p", null, message),
+      h("div", { className: "relay-status" },
+        h("span", null, "Relay URL"),
+        h("code", null, RELAY_URL || "Not configured")
+      ),
+      h("p", { className: "hint-text" }, "Expected Render WebSocket format: wss://your-render-service.onrender.com/ws"),
+      h("div", { className: "dialog-actions" },
+        failed ? h("button", { className: "ghost", "data-action": "close-modal" }, "Close") : h("button", { className: "ghost", "data-action": "cancel-relay-connect" }, "Cancel"),
+        h("button", { "data-action": "retry-relay" }, failed ? "Try Again" : "Retry Now")
+      )
+    )
+  );
+}
+
+function ConfirmQuitDialog() {
+  return h("div", { className: "modal-backdrop" },
+    h("section", { className: "dialog" },
+      h("h2", null, "Quit Game?"),
+      h("p", null, "You will leave this table and return to the main menu."),
+      h("div", { className: "dialog-actions" },
+        h("button", { className: "ghost", "data-action": "close-modal" }, "No"),
+        h("button", { className: "danger", "data-action": "quit-game" }, "Yes, Quit")
+      )
     )
   );
 }
@@ -1147,6 +1280,10 @@ function handleAction(action, target) {
   if (action === "options") state.modal = { type: "options" };
   if (action === "rules") state.modal = { type: "rules" };
   if (action === "close-modal") state.modal = null;
+  if (action === "confirm-quit") state.modal = { type: "confirmQuit" };
+  if (action === "quit-game") quitGame();
+  if (action === "retry-relay") retryRelayConnection();
+  if (action === "cancel-relay-connect") cancelRelayConnection();
   if (action === "open-options") state.modal = { type: "options" };
   if (action === "save-options") saveOptions();
   if (action === "single") state.modal = { type: "ai" };

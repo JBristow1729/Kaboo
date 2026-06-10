@@ -196,8 +196,8 @@ select:focus {
 }
 
 .rules-dialog {
-  width: min(100%, 620px);
-  max-height: min(760px, calc(100vh - 36px));
+  width: min(100%, 860px);
+  max-height: min(820px, calc(100vh - 36px));
   overflow: auto;
 }
 
@@ -221,7 +221,7 @@ select:focus {
 
 .rule-action-row {
   display: grid;
-  grid-template-columns: auto auto 1fr;
+  grid-template-columns: 150px auto 1fr;
   align-items: center;
   gap: 12px;
 }
@@ -288,6 +288,33 @@ select:focus {
   margin-top: 20px;
 }
 
+.relay-dialog {
+  width: min(100%, 560px);
+}
+
+.relay-status {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: center;
+  margin: 16px 0 8px;
+}
+
+.relay-status code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 8px 10px;
+}
+
+.hint-text {
+  margin: 0;
+  color: rgba(245, 234, 209, 0.68);
+  font-size: 0.9rem;
+}
+
 .ghost {
   background: rgba(255, 255, 255, 0.08);
   color: var(--cream);
@@ -298,6 +325,10 @@ select:focus {
   background: linear-gradient(180deg, #f68a75, var(--red));
   box-shadow: 0 8px 0 #7d1d18, 0 14px 26px rgba(0, 0, 0, 0.25);
   color: white;
+}
+
+.quit-button {
+  z-index: 15;
 }
 
 .danger-text {
