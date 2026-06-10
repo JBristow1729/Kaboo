@@ -197,7 +197,7 @@ function handleRelayMessage(message) {
 
 function hydrateOnlineGame(game) {
   if (!game) return null;
-  return {
+  const hydrated = {
     ...game,
     visibleToHuman: new Map((game.visibleToHuman || []).map((cardId) => [cardId, Date.now() + 3600000])),
     readyPlayers: new Set(game.readyPlayers || []),
@@ -206,8 +206,25 @@ function hydrateOnlineGame(game) {
     snappedCardIds: new Set(game.snappedCardIds || []),
     finalTurns: game.finalTurns ? new Set(game.finalTurns) : null,
     players: (game.players || []).map((player) => ({ ...player, memory: new Set(player.memory || []) })),
-    animations: game.animations || [],
+    animations: [],
     selection: game.selection || []
+  };
+  hydrated.animations = (game.animations || []).map((animation) => hydrateAnimation(animation, hydrated));
+  return hydrated;
+}
+
+function hydrateAnimation(animation, game) {
+  if (animation.from && animation.to && animation.mid) return animation;
+  const from = positionForTarget(animation.fromTarget || animation.from || "deck", game);
+  const to = positionForTarget(animation.toTarget || animation.to || "discard", game);
+  return {
+    ...animation,
+    from,
+    to,
+    mid: {
+      x: (from.x + to.x) / 2,
+      y: (from.y + to.y) / 2
+    }
   };
 }
 
@@ -690,22 +707,24 @@ function DeckPile({ game }) {
   const humanHeldDeck = isLocalTurn(game) && game.heldCard && game.source === "deck";
   const stack = Math.min(14, Math.max(1, Math.ceil(game.deck.length / 4)));
   const hidden = isPileHidden("deck", game);
-  if (humanHeldDeck && hidden) return h("div", { className: "pile" }, h("button", { className: "card back pile-card stacked", style: { "--stack": `${stack}px` }, "data-action": "draw-deck", "aria-label": "Draw from deck" }, h(StackLayers, { stack })));
+  const canDraw = canHumanAct() && !game.heldCard;
+  if (humanHeldDeck && hidden) return h("div", { className: "pile" }, h("button", { className: "card back pile-card stacked", style: { "--stack": `${stack}px` }, "data-action": "draw-deck", disabled: !canDraw, "aria-label": "Draw from deck" }, h(StackLayers, { stack })));
   if (humanHeldDeck) return h("div", { className: "pile" }, h(CardView, { card: game.heldCard, visible: true, extra: `selected pile-card stacked ${hidden ? "in-flight" : ""}`, action: "held-deck", stack }));
-  return h("div", { className: "pile" }, h("button", { className: `card back pile-card stacked ${game.source === "deck" ? "selected" : ""}`, style: { "--stack": `${stack}px` }, "data-action": "draw-deck", "aria-label": "Draw from deck" }, h(StackLayers, { stack })));
+  return h("div", { className: "pile" }, h("button", { className: `card back pile-card stacked ${game.source === "deck" ? "selected" : ""}`, style: { "--stack": `${stack}px` }, "data-action": "draw-deck", disabled: !canDraw, "aria-label": "Draw from deck" }, h(StackLayers, { stack })));
 }
 
 function DiscardPile({ game }) {
   const humanHeldDiscard = isLocalTurn(game) && game.heldCard && game.source === "discard";
   const stack = Math.min(14, Math.max(1, Math.ceil(game.discard.length / 3)));
   const hidden = isPileHidden("discard", game);
+  const action = canHumanAct() && !game.heldCard ? "discard" : "";
   if (humanHeldDiscard && !hidden) return h("div", { className: "pile" }, h(CardView, { card: game.heldCard, visible: true, extra: "selected pile-card stacked", action: "held-discard", stack }));
   if (hidden) {
     const underCard = game.discard.length > 1 ? game.discard[game.discard.length - 2] : null;
-    return h("div", { className: "pile" }, underCard ? h(CardView, { card: underCard, visible: true, extra: "pile-card stacked", action: "discard", stack: Math.max(1, stack - 1) }) : h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", "aria-label": "Empty discard pile" }));
+    return h("div", { className: "pile" }, underCard ? h(CardView, { card: underCard, visible: true, extra: "pile-card stacked", action, stack: Math.max(1, stack - 1) }) : h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", disabled: !canHumanAct(), "aria-label": "Empty discard pile" }));
   }
-  if (game.discard.length) return h("div", { className: "pile" }, h(CardView, { card: last(game.discard), visible: true, extra: "pile-card stacked", action: "discard", stack }));
-  return h("div", { className: "pile" }, h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", "aria-label": "Empty discard pile" }));
+  if (game.discard.length) return h("div", { className: "pile" }, h(CardView, { card: last(game.discard), visible: true, extra: "pile-card stacked", action, stack }));
+  return h("div", { className: "pile" }, h("button", { className: "card pile-card empty table-empty", "data-action": "discard-empty", disabled: !canHumanAct(), "aria-label": "Empty discard pile" }));
 }
 
 function AnimationLayer({ animations }) {
@@ -2450,16 +2469,16 @@ function isAnimating(game = state.game) {
   return Boolean(game && (game.animationLock || game.animations.length));
 }
 
-function positionForTarget(target) {
+function positionForTarget(target, game = state.game) {
   if (target === "deck") return { x: 47, y: 50 };
   if (target === "discard") return { x: 55, y: 50 };
   if (target === "pile") {
-    const source = state.game?.source;
+    const source = game?.source;
     return source === "discard" ? positionForTarget("discard") : positionForTarget("deck");
   }
   if (target && typeof target === "object") {
-    const hand = getHandPosition(target.playerIndex, state.game.players.length);
-    if (isLocalPlayerIndex(target.playerIndex, state.game)) {
+    const hand = getHandPosition(target.playerIndex, game.players.length);
+    if (isLocalPlayerIndex(target.playerIndex, game)) {
       const offset = slotOffset(target.cardIndex, true);
       return { x: 50 + offset.x, y: 86 + offset.y };
     }

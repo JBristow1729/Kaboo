@@ -6,6 +6,9 @@ const PORT = Number(process.env.PORT || 10000);
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
 const TURN_SECONDS = 20;
 const READY_SECONDS = 30;
+const LOOK_MS = 4000;
+const MOVE_MS = 3200;
+const SNAP_MOVE_MS = 2200;
 const MAX_PLAYERS = 8;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = [
@@ -144,7 +147,8 @@ function mutateLobby(client, fn) {
   if (!room) return sendError(client, "You are not in a lobby.");
   fn(room);
   room.updatedAt = Date.now();
-  broadcastLobby(room);
+  if (room.game) broadcastGame(room);
+  else broadcastLobby(room);
   broadcastPublicLobbies();
 }
 
@@ -208,6 +212,7 @@ function startGame(room, client) {
     heldBy: null,
     pendingAction: null,
     selection: [],
+    animations: [],
     visible: new Map(),
     snappedCardIds: new Set(),
     snapLockedDiscardId: null,
@@ -221,7 +226,6 @@ function startGame(room, client) {
     log: ["Cards dealt. AI players are ready. Ready up when you have memorized your cards."],
     notice: null
   };
-  room.players.forEach((p) => { p.ready = false; });
   broadcastGame(room);
 }
 
@@ -241,7 +245,7 @@ function handleGameIntent(room, game, playerIndex, intent) {
   if (intent.action === "drawDiscard") return drawDiscard(game, playerIndex);
   if (intent.action === "playHeld") return playHeld(game, playerIndex);
   if (intent.action === "swapHeld") return swapHeld(game, playerIndex, Number(intent.cardIndex));
-  if (intent.action === "cardAction") return handlePendingCard(game, playerIndex, Number(intent.targetPlayerIndex), Number(intent.cardIndex));
+  if (intent.action === "cardAction") return handlePendingCard(room, game, playerIndex, Number(intent.targetPlayerIndex), Number(intent.cardIndex));
   if (intent.action === "cancelAction") return cancelAction(game, true);
   if (intent.action === "confirmKingSwap") return confirmKingSwap(game);
   if (intent.action === "giveSnapCard") return giveSnapCard(game, Number(intent.cardIndex));
@@ -251,6 +255,7 @@ function handleGameIntent(room, game, playerIndex, intent) {
 function tickGame(room, now) {
   const game = room.game;
   clearExpiredVisibility(game, now);
+  clearExpiredAnimations(game, now);
   if (game.phase === "ready" && now >= game.readyEndsAt) {
     game.players.forEach((_, index) => game.readyPlayers.add(index));
     beginTurns(game);
@@ -258,6 +263,7 @@ function tickGame(room, now) {
     return;
   }
   if (game.phase !== "playing") return;
+  if (game.actionHoldUntil && now < game.actionHoldUntil) return;
   const current = game.players[game.currentPlayer];
   if (current?.ai && !game.heldCard && !game.pendingAction && now + 16000 >= game.turnEndsAt) {
     aiTurn(game);
@@ -283,6 +289,7 @@ function drawDeck(game, playerIndex) {
   game.heldBy = playerIndex;
   game.source = "deck";
   rememberCard(game.players[playerIndex], game.heldCard);
+  pushAnimation(game, "deck", "deck", game.heldCard, { startFace: "down", endFace: "up", endVisibleTo: [game.players[playerIndex].id] });
   game.message = "Swap with one of your cards, or play it to the discard pile.";
 }
 
@@ -292,6 +299,7 @@ function drawDiscard(game, playerIndex) {
   game.heldBy = playerIndex;
   game.source = "discard";
   rememberCard(game.players[playerIndex], game.heldCard);
+  pushAnimation(game, "discard", "discard", game.heldCard, { startFace: "up", endFace: "up" });
   game.message = "Swap the discard card with one of your cards.";
 }
 
@@ -299,8 +307,16 @@ function swapHeld(game, playerIndex, cardIndex) {
   const player = game.players[playerIndex];
   const oldCard = player.cards[cardIndex];
   if (!game.heldCard || !oldCard || game.heldBy !== playerIndex) return;
+  const incoming = game.heldCard;
+  const source = game.source;
+  pushAnimation(game, source === "discard" ? "discard" : "deck", { playerIndex, cardIndex }, incoming, {
+    startFace: source === "discard" ? "up" : "up",
+    endFace: "down",
+    startVisibleTo: source === "discard" ? null : [player.id]
+  });
+  pushAnimation(game, { playerIndex, cardIndex }, "discard", oldCard, { startFace: "down", endFace: "up" });
   player.cards[cardIndex] = game.heldCard;
-  rememberCard(player, game.heldCard);
+  rememberCard(player, incoming);
   game.discard.push(oldCard);
   rememberDiscard(game, oldCard);
   game.log.push(`${player.name} swapped a card.`);
@@ -314,6 +330,11 @@ function swapHeld(game, playerIndex, cardIndex) {
 function playHeld(game, playerIndex) {
   if (!game.heldCard || game.source !== "deck" || game.heldBy !== playerIndex) return;
   const card = game.heldCard;
+  pushAnimation(game, game.source === "discard" ? "discard" : "deck", "discard", card, {
+    startFace: "up",
+    endFace: "up",
+    startVisibleTo: game.source === "deck" ? [game.players[playerIndex].id] : null
+  });
   game.discard.push(card);
   rememberDiscard(game, card);
   game.log.push(`${game.players[playerIndex].name} played ${cardLabel(card)}.`);
@@ -346,7 +367,7 @@ function setActionFor(game, card) {
   if (game.players[game.currentPlayer]?.ai) aiResolveAction(game);
 }
 
-function handlePendingCard(game, playerIndex, targetPlayerIndex, cardIndex) {
+function handlePendingCard(room, game, playerIndex, targetPlayerIndex, cardIndex) {
   const action = game.pendingAction;
   if (!action) return;
   if (action.type === "snapGive") {
@@ -361,12 +382,10 @@ function handlePendingCard(game, playerIndex, targetPlayerIndex, cardIndex) {
     return;
   }
   if (action.type === "ownPeek" && targetPlayerIndex === playerIndex) {
-    revealTo(game, playerIndex, target.cards[cardIndex], 3500);
-    return cancelAction(game, true);
+    return revealForAction(room, game, playerIndex, targetPlayerIndex, cardIndex, true);
   }
   if (action.type === "opponentPeek" && targetPlayerIndex !== playerIndex) {
-    revealTo(game, playerIndex, target.cards[cardIndex], 3500);
-    return cancelAction(game, true);
+    return revealForAction(room, game, playerIndex, targetPlayerIndex, cardIndex, true);
   }
   if (action.type === "blindSwap" || action.type === "kingSwap") {
     action.picks.push({ playerIndex: targetPlayerIndex, cardIndex });
@@ -377,7 +396,7 @@ function handlePendingCard(game, playerIndex, targetPlayerIndex, cardIndex) {
       game.selection = [];
       swapTwo(game, action.picks[0], action.picks[1], true);
     } else {
-      action.picks.forEach((pick) => revealTo(game, playerIndex, game.players[pick.playerIndex].cards[pick.cardIndex], 30000));
+      action.picks.forEach((pick) => revealForAction(room, game, playerIndex, pick.playerIndex, pick.cardIndex, false));
       game.pendingAction = { type: "kingChoice", picks: action.picks };
       game.message = "Swap those cards or leave them where they are.";
     }
@@ -410,6 +429,7 @@ function attemptSnap(game, snappingPlayerIndex, ownerIndex, cardIndex) {
   game.notice = { kind: "snap", playerIndex: snappingPlayerIndex, expiresAt: Date.now() + 1800 };
   if (target.rank === top.rank) {
     game.snappedCardIds.add(target.id);
+    pushAnimation(game, { playerIndex: ownerIndex, cardIndex }, "discard", target, { startFace: "down", endFace: "up", duration: SNAP_MOVE_MS });
     owner.cards[cardIndex] = null;
     game.discard.push(target);
     rememberDiscard(game, target);
@@ -420,7 +440,13 @@ function attemptSnap(game, snappingPlayerIndex, ownerIndex, cardIndex) {
       if (snapper.ai) giveSnapCard(game, pickWorstKnownCard(snapper));
     }
   } else {
-    if (ensureDeck(game)) placeCardInHand(snapper, game.deck.pop());
+    pushAnimation(game, { playerIndex: ownerIndex, cardIndex }, "discard", target, { startFace: "down", endFace: "up", duration: SNAP_MOVE_MS });
+    pushAnimation(game, "discard", { playerIndex: ownerIndex, cardIndex }, target, { startFace: "up", endFace: "down", duration: SNAP_MOVE_MS });
+    if (ensureDeck(game)) {
+      const penalty = game.deck.pop();
+      const penaltyIndex = placeCardInHand(snapper, penalty);
+      pushAnimation(game, "deck", { playerIndex: snappingPlayerIndex, cardIndex: penaltyIndex }, penalty, { startFace: "down", endFace: "down", duration: SNAP_MOVE_MS });
+    }
     game.log.push(`${snapper.name} missed a snap and took a penalty card.`);
   }
 }
@@ -436,6 +462,7 @@ function giveSnapCard(game, giveIndex) {
     game.selection = [];
     return;
   }
+  pushAnimation(game, { playerIndex: action.snappingPlayerIndex, cardIndex: giveIndex }, { playerIndex: action.ownerIndex, cardIndex: action.ownerCardIndex }, snapper.cards[giveIndex], { startFace: "down", endFace: "down", duration: SNAP_MOVE_MS });
   owner.cards[action.ownerCardIndex] = snapper.cards[giveIndex];
   snapper.cards[giveIndex] = null;
   game.pendingAction = null;
@@ -447,6 +474,8 @@ function swapTwo(game, a, b, advanceAfter = false) {
   const cardA = game.players[a.playerIndex]?.cards[a.cardIndex];
   const cardB = game.players[b.playerIndex]?.cards[b.cardIndex];
   if (!cardA || !cardB) return;
+  pushAnimation(game, a, b, cardA, { startFace: "down", endFace: "down" });
+  pushAnimation(game, b, a, cardB, { startFace: "down", endFace: "down" });
   game.players[a.playerIndex].cards[a.cardIndex] = cardB;
   game.players[b.playerIndex].cards[b.cardIndex] = cardA;
   game.log.push("Two table cards were swapped.");
@@ -471,6 +500,7 @@ function endTurn(game) {
   game.heldCard = null;
   game.heldBy = null;
   game.source = null;
+  game.actionHoldUntil = 0;
   if (game.pendingAction?.type !== "snapGive") {
     game.pendingAction = null;
     game.selection = [];
@@ -501,6 +531,10 @@ function finishGame(game) {
 
 function timeoutTurn(game) {
   if (game.pendingAction?.type === "snapGive") return giveSnapCard(game, randomIndex(game.players[game.pendingAction.snappingPlayerIndex].cards));
+  if (game.pendingAction) {
+    game.log.push(`${game.players[game.currentPlayer].name}'s action timed out.`);
+    return cancelAction(game, true);
+  }
   const player = game.players[game.currentPlayer];
   if (player.ai) return aiTurn(game);
   if (ensureDeck(game)) placeCardInHand(player, game.deck.pop());
@@ -525,16 +559,17 @@ function aiTurn(game) {
 function aiResolveAction(game) {
   const action = game.pendingAction;
   const aiIndex = game.currentPlayer;
+  const room = rooms.get(game.roomCode);
   if (!action) return;
   if (action.type === "ownPeek") {
     const index = leastCertainOwnCardIndex(game.players[aiIndex]);
-    if (index >= 0) revealTo(game, aiIndex, game.players[aiIndex].cards[index], 3500);
+    if (index >= 0 && room) return revealForAction(room, game, aiIndex, aiIndex, index, true);
     return cancelAction(game, true);
   }
   if (action.type === "opponentPeek") {
     const opponent = nextOpponentIndex(game, aiIndex);
     const cardIndex = opponent >= 0 ? randomIndex(game.players[opponent].cards) : -1;
-    if (cardIndex >= 0) revealTo(game, aiIndex, game.players[opponent].cards[cardIndex], 3500);
+    if (cardIndex >= 0 && room) return revealForAction(room, game, aiIndex, opponent, cardIndex, true);
     return cancelAction(game, true);
   }
   if (action.type === "blindSwap" || action.type === "kingSwap") {
@@ -609,12 +644,12 @@ function gameView(game, client) {
     selection: game.selection || [],
     pendingAction: game.pendingAction,
     visibleToHuman: [],
-    animations: [],
+    animations: (game.animations || []).filter((animation) => animation.expiresAt > now).map((animation) => animationView(animation, client)),
     kabooShouts: game.notice?.kind === "kaboo" && game.notice.expiresAt > now ? [{ playerIndex: game.notice.playerIndex, expiresAt: game.notice.expiresAt }] : [],
     kabooNotice: game.notice?.kind === "kaboo" && game.notice.expiresAt > now ? { playerIndex: game.notice.playerIndex, expiresAt: game.notice.expiresAt } : null,
     snapNotice: game.notice?.kind === "snap" && game.notice.expiresAt > now ? { playerIndex: game.notice.playerIndex, expiresAt: game.notice.expiresAt } : null,
-    hiddenSlots: [],
-    hiddenPiles: [],
+    hiddenSlots: hiddenSlotsFor(game),
+    hiddenPiles: hiddenPilesFor(game),
     snapLockedDiscardId: game.snapLockedDiscardId,
     snappedCardIds: Array.from(game.snappedCardIds),
     phase: game.phase,
@@ -637,6 +672,53 @@ function canSeeCard(game, localIndex, playerIndex, cardIndex, visibleIds) {
   if (game.phase === "complete") return true;
   if (game.phase === "ready" && playerIndex === localIndex && !game.readyPlayers.has(localIndex) && cardIndex >= 2) return true;
   return visibleIds.has(card.id);
+}
+
+function animationView(animation, client) {
+  const startFace = visibleFaceFor(animation.startFace, animation.startVisibleTo, client.playerId);
+  const endFace = visibleFaceFor(animation.endFace, animation.endVisibleTo, client.playerId);
+  const expose = startFace === "up" || endFace === "up";
+  return {
+    id: animation.id,
+    fromTarget: animation.from,
+    toTarget: animation.to,
+    startFace,
+    endFace,
+    red: expose && animation.card?.suit?.color === "red",
+    rank: expose ? animation.card?.rank || "" : "",
+    glyph: expose ? animation.card?.suit?.glyph || "" : "",
+    duration: animation.duration,
+    flipDelay: Math.max(200, Math.floor((animation.duration - 1500) / 2)),
+    expiresAt: animation.expiresAt
+  };
+}
+
+function visibleFaceFor(face, visibleTo, playerId) {
+  if (face !== "up") return face;
+  if (!visibleTo || visibleTo.includes(playerId)) return "up";
+  return "down";
+}
+
+function hiddenSlotsFor(game) {
+  const slots = new Set();
+  (game.animations || []).forEach((animation) => {
+    [animation.from, animation.to].forEach((target) => {
+      if (target && typeof target === "object" && Number.isInteger(target.playerIndex) && Number.isInteger(target.cardIndex)) {
+        slots.add(`${target.playerIndex}:${target.cardIndex}`);
+      }
+    });
+  });
+  return Array.from(slots);
+}
+
+function hiddenPilesFor(game) {
+  const piles = new Set();
+  (game.animations || []).forEach((animation) => {
+    [animation.from, animation.to].forEach((target) => {
+      if (target === "deck" || target === "discard") piles.add(target);
+    });
+  });
+  return Array.from(piles);
 }
 
 function sanitizeCard(card, visible) {
@@ -716,13 +798,82 @@ function ensureDeck(game) {
 
 function placeCardInHand(player, card) {
   const index = player.cards.findIndex((item) => !item);
-  player.cards[index >= 0 ? index : player.cards.length] = card;
+  const targetIndex = index >= 0 ? index : player.cards.length;
+  player.cards[targetIndex] = card;
+  return targetIndex;
 }
 
 function revealTo(game, playerIndex, card, duration) {
   if (!card) return;
   rememberCard(game.players[playerIndex], card);
   game.visible.set(card.id, { playerId: game.players[playerIndex].id, expiresAt: Date.now() + duration });
+}
+
+function revealForAction(room, game, viewingPlayerIndex, targetPlayerIndex, cardIndex, advanceAfter) {
+  const card = game.players[targetPlayerIndex]?.cards[cardIndex];
+  if (!card) return;
+  const viewerId = game.players[viewingPlayerIndex].id;
+  revealTo(game, viewingPlayerIndex, card, LOOK_MS);
+  pushAnimation(game, { playerIndex: targetPlayerIndex, cardIndex }, { playerIndex: targetPlayerIndex, cardIndex }, card, {
+    startFace: "down",
+    endFace: "up",
+    startVisibleTo: [],
+    endVisibleTo: [viewerId],
+    duration: LOOK_MS
+  });
+  setTimeout(() => {
+    if (room.game !== game) return;
+    pushAnimation(game, { playerIndex: targetPlayerIndex, cardIndex }, { playerIndex: targetPlayerIndex, cardIndex }, card, {
+      startFace: "up",
+      endFace: "down",
+      startVisibleTo: [viewerId],
+      endVisibleTo: [],
+      duration: 1500
+    });
+    clearVisiblePicks(game, [{ playerIndex: targetPlayerIndex, cardIndex }]);
+    if (advanceAfter && game.pendingAction) {
+      game.pendingAction = null;
+      game.selection = [];
+      setTimeout(() => {
+        if (room.game !== game) return;
+        endTurn(game);
+        broadcastGame(room);
+      }, 1500);
+    }
+    broadcastGame(room);
+  }, LOOK_MS);
+  game.actionHoldUntil = Math.max(game.actionHoldUntil || 0, Date.now() + LOOK_MS + (advanceAfter ? 1500 : 0));
+  if (advanceAfter) {
+    game.pendingAction = null;
+    game.selection = [];
+  }
+}
+
+function pushAnimation(game, from, to, card, options = {}) {
+  game.animations ||= [];
+  const duration = options.duration || MOVE_MS;
+  game.animations.push({
+    id: randomUUID(),
+    from,
+    to,
+    card,
+    startFace: options.startFace || "down",
+    endFace: options.endFace || options.startFace || "down",
+    startVisibleTo: normalizeVisibleTo(options.startVisibleTo),
+    endVisibleTo: normalizeVisibleTo(options.endVisibleTo),
+    duration,
+    expiresAt: Date.now() + duration
+  });
+}
+
+function normalizeVisibleTo(value) {
+  if (value === undefined) return null;
+  if (value === null) return null;
+  return Array.isArray(value) ? value : [value];
+}
+
+function clearExpiredAnimations(game, now) {
+  game.animations = (game.animations || []).filter((animation) => animation.expiresAt > now);
 }
 
 function clearVisiblePicks(game, picks) {
