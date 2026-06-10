@@ -4,7 +4,7 @@ import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 10000);
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
-const TURN_SECONDS = 20;
+const TURN_SECONDS = 120;
 const READY_SECONDS = 30;
 const LOOK_MS = 4000;
 const MOVE_MS = 3200;
@@ -575,8 +575,7 @@ function timeoutTurn(game) {
   }
   const player = game.players[game.currentPlayer];
   if (player.ai) return aiTurn(game);
-  if (ensureDeck(game)) placeCardInHand(player, game.deck.pop());
-  game.log.push(`${player.name} timed out and took a penalty card.`);
+  game.log.push(`${player.name} timed out. Play passed.`);
   endTurn(game);
 }
 
@@ -709,6 +708,7 @@ function gameView(game, client) {
 function canSeeCard(game, localIndex, playerIndex, cardIndex, visibleIds) {
   const card = game.players[playerIndex].cards[cardIndex];
   if (!card) return false;
+  if (game.phase === "revealing") return true;
   if (game.phase === "complete") return true;
   if (game.phase === "ready" && playerIndex === localIndex && !game.readyPlayers.has(localIndex) && cardIndex >= 2) return true;
   return visibleIds.has(card.id);

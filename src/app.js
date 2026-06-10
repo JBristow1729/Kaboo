@@ -5,7 +5,7 @@ import "./styles.css";
 const h = React.createElement;
 
 const STORAGE_KEY = "kaboo-settings-v1";
-const TURN_SECONDS = 20;
+const TURN_SECONDS = 120;
 const READY_SECONDS = 30;
 const RELAY_CONNECT_TIMEOUT_MS = 60000;
 const RELAY_RETRY_MS = 4500;
@@ -2174,8 +2174,7 @@ function timeoutTurn() {
     scheduleAiTurn();
     return;
   }
-  if (ensureDeck()) placeCardInHand(player, game.deck.pop());
-  game.log.push(`${player.name} timed out and took a penalty card.`);
+  game.log.push(`${player.name} timed out. Play passed.`);
   endTurn();
 }
 
