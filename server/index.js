@@ -94,6 +94,7 @@ function handleMessage(client, message) {
   if (type === "setReady") return mutateLobby(client, (room) => setPlayerReady(room, client.playerId, Boolean(payload.ready)));
   if (type === "addCpu") return mutateLobby(client, (room) => addCpu(room, client));
   if (type === "ejectCpu") return mutateLobby(client, (room) => ejectCpu(room, client, payload.playerId));
+  if (type === "ejectPlayer") return mutateLobby(client, (room) => ejectPlayer(room, client, payload.playerId));
   if (type === "startGame") return mutateLobby(client, (room) => startGame(room, client));
   if (type === "gameIntent") return mutateGame(client, (room, game, playerIndex) => handleGameIntent(room, game, playerIndex, payload));
   if (type === "playAgain") return mutateLobby(client, (room) => {
@@ -182,6 +183,24 @@ function ejectCpu(room, client, playerId) {
   if (index >= 0) room.players.splice(index, 1);
 }
 
+function ejectPlayer(room, client, playerId) {
+  if (room.hostClientId !== client.id) return sendError(client, "Only the host can eject players.");
+  if (room.game) return sendError(client, "Players can only be ejected before the game starts.");
+  const index = room.players.findIndex((p) => p.id === playerId && !p.ai);
+  if (index < 0) return;
+  const player = room.players[index];
+  if (player.clientId === client.id) return sendError(client, "The host cannot eject themselves.");
+  room.players.splice(index, 1);
+  for (const other of clients.values()) {
+    if (other.id === player.clientId && other.roomCode === room.code) {
+      other.roomCode = null;
+      other.playerId = null;
+      send(other, "leftLobby", { message: "You were ejected from the lobby." });
+      break;
+    }
+  }
+}
+
 function startGame(room, client) {
   if (room.hostClientId !== client.id) return sendError(client, "Only the host can start.");
   const players = room.players.filter((p) => !p.left);
@@ -212,6 +231,7 @@ function startGame(room, client) {
     heldBy: null,
     pendingAction: null,
     selection: [],
+    actionTakenThisTurn: false,
     animations: [],
     visible: new Map(),
     snappedCardIds: new Set(),
@@ -226,6 +246,9 @@ function startGame(room, client) {
     log: ["Cards dealt. AI players are ready. Ready up when you have memorized your cards."],
     notice: null
   };
+  room.players.forEach((player) => {
+    player.ready = false;
+  });
   broadcastGame(room);
 }
 
@@ -244,7 +267,9 @@ function handleGameIntent(room, game, playerIndex, intent) {
   }
   if (intent.action === "snap") return attemptSnap(game, playerIndex, Number(intent.ownerIndex), Number(intent.cardIndex));
   if (game.currentPlayer !== playerIndex) return;
+  if (game.actionHoldUntil && Date.now() < game.actionHoldUntil) return;
   resetTurnTimer(game);
+  if (intent.action === "kaboo") return callKaboo(game, playerIndex);
   if (intent.action === "drawDeck") return drawDeck(game, playerIndex);
   if (intent.action === "drawDiscard") return drawDiscard(game, playerIndex);
   if (intent.action === "playHeld") return playHeld(game, playerIndex);
@@ -252,7 +277,6 @@ function handleGameIntent(room, game, playerIndex, intent) {
   if (intent.action === "cardAction") return handlePendingCard(room, game, playerIndex, Number(intent.targetPlayerIndex), Number(intent.cardIndex));
   if (intent.action === "cancelAction") return cancelAction(game, true);
   if (intent.action === "confirmKingSwap") return confirmKingSwap(game);
-  if (intent.action === "kaboo") return callKaboo(game, playerIndex);
 }
 
 function tickGame(room, now) {
@@ -289,6 +313,7 @@ function beginTurns(game) {
 
 function drawDeck(game, playerIndex) {
   if (game.heldCard || !ensureDeck(game)) return;
+  game.actionTakenThisTurn = true;
   game.heldCard = game.deck.pop();
   game.heldBy = playerIndex;
   game.source = "deck";
@@ -298,6 +323,7 @@ function drawDeck(game, playerIndex) {
 
 function drawDiscard(game, playerIndex) {
   if (game.heldCard || !game.discard.length) return;
+  game.actionTakenThisTurn = true;
   game.heldCard = game.discard.pop();
   game.heldBy = playerIndex;
   game.source = "discard";
@@ -398,7 +424,7 @@ function handlePendingCard(room, game, playerIndex, targetPlayerIndex, cardIndex
     return revealForAction(room, game, playerIndex, targetPlayerIndex, cardIndex, true);
   }
   if (action.type === "blindSwap" || action.type === "kingSwap") {
-    action.picks.push({ playerIndex: targetPlayerIndex, cardIndex });
+    action.picks = [...(action.picks || []), { playerIndex: targetPlayerIndex, cardIndex }];
     game.selection = action.picks;
     if (action.picks.length < 2) return;
     if (action.type === "blindSwap") {
@@ -494,7 +520,7 @@ function swapTwo(game, a, b, advanceAfter = false) {
 }
 
 function callKaboo(game, playerIndex) {
-  if (game.kabooBy !== null || game.heldCard || game.pendingAction) return;
+  if (game.kabooBy !== null || game.heldCard || game.pendingAction || game.actionTakenThisTurn) return;
   game.kabooBy = playerIndex;
   game.players[playerIndex].protected = true;
   game.finalTurns = new Set(game.players.map((_, i) => i).filter((i) => i !== playerIndex));
@@ -512,6 +538,7 @@ function endTurn(game) {
   game.heldBy = null;
   game.source = null;
   game.actionHoldUntil = 0;
+  game.actionTakenThisTurn = false;
   if (game.pendingAction?.type !== "snapGive") {
     game.pendingAction = null;
     game.selection = [];
@@ -561,7 +588,7 @@ function finishGame(game) {
     const room = rooms.get(game.roomCode);
     if (!room || room.game !== game) return;
     game.phase = "complete";
-    game.message = winners.length > 1 ? "The game is a draw." : `${game.players[winners[0].i].name} Wins!`;
+    game.message = winners.length > 1 ? "It's a Draw!" : `${game.players[winners[0].i].name} Wins!`;
     game.leaveAt = Date.now() + 30000;
     broadcastGame(room);
   }, 5800);
@@ -681,6 +708,7 @@ function gameView(game, client) {
     source: game.source,
     selection: game.selection || [],
     pendingAction: game.pendingAction,
+    actionTakenThisTurn: Boolean(game.actionTakenThisTurn),
     visibleToHuman: [],
     animations: (game.animations || []).filter((animation) => animation.expiresAt > now).map((animation) => animationView(animation, client)),
     kabooShouts: game.notice?.kind === "kaboo" && game.notice.expiresAt > now ? [{ playerIndex: game.notice.playerIndex, expiresAt: game.notice.expiresAt }] : [],
@@ -788,8 +816,6 @@ function leaveRoom(client) {
   if (!room) return;
   if (room.game) {
     leaveActiveGame(room, client);
-    client.roomCode = null;
-    client.playerId = null;
     return;
   }
   const player = room.players.find((p) => p.id === client.playerId);
@@ -799,18 +825,21 @@ function leaveRoom(client) {
     room.hostClientId = nextHost?.clientId || room.hostClientId;
   }
   room.players = room.players.filter((p) => !p.left || p.ai);
-  if (!room.players.some((p) => !p.ai)) rooms.delete(room.code);
-  else broadcastLobby(room);
   client.roomCode = null;
   client.playerId = null;
+  if (!room.players.some((p) => !p.ai)) rooms.delete(room.code);
+  else broadcastLobby(room);
 }
 
 function leaveActiveGame(room, client) {
   const game = room.game;
-  const playerIndex = game.players.findIndex((p) => p.id === client.playerId);
+  const leavingPlayerId = client.playerId;
+  const playerIndex = game.players.findIndex((p) => p.id === leavingPlayerId);
   if (playerIndex < 0) return;
   const activePlayers = game.players.filter((p) => !p.left);
-  const remaining = activePlayers.filter((p) => p.id !== client.playerId);
+  const remaining = activePlayers.filter((p) => p.id !== leavingPlayerId);
+  client.roomCode = null;
+  client.playerId = null;
   if (remaining.length <= 1) {
     for (const other of clients.values()) {
       if (other.roomCode === room.code && other.id !== client.id) {
@@ -912,7 +941,7 @@ function revealForAction(room, game, viewingPlayerIndex, targetPlayerIndex, card
       duration: 1500
     });
     clearVisiblePicks(game, [{ playerIndex: targetPlayerIndex, cardIndex }]);
-    if (advanceAfter && game.pendingAction) {
+    if (advanceAfter) {
       game.pendingAction = null;
       game.selection = [];
       setTimeout(() => {
@@ -1067,7 +1096,7 @@ function shouldAiPickDiscard(game, playerIndex) {
 }
 
 function shouldAiCallKaboo(game, playerIndex) {
-  if (game.kabooBy !== null || game.heldCard || game.finalTurns) return false;
+  if (game.kabooBy !== null || game.heldCard || game.finalTurns || game.actionTakenThisTurn) return false;
   const player = game.players[playerIndex];
   const score = player.cards.reduce((sum, card) => sum + estimatedCardValue(player, card), 0);
   const known = player.cards.filter((card) => card && player.memory.has(card.id)).length;

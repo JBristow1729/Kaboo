@@ -636,6 +636,9 @@ select:focus {
 .rank {
   font-weight: 900;
   font-size: calc(var(--card-w) * 0.22);
+  line-height: 1;
+  justify-self: start;
+  align-self: start;
 }
 
 .top-card-face {

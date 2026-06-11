@@ -192,6 +192,7 @@ function handleRelayMessage(message) {
     if (state.game.snapNotice && state.game.snapNotice.expiresAt !== previousSnap) bloop("bloop");
     state.screen = "game";
     if (state.modal?.type === "relay") state.modal = null;
+    if (state.modal?.type === "end" && state.game.phase !== "complete") state.modal = null;
     scheduleOnlineEndDialog(state.game);
     startTicker();
   }
@@ -206,6 +207,15 @@ function handleRelayMessage(message) {
     clearTimeout(endDialogTimer);
     endDialogTimer = null;
     state.modal = { type: "alert", title: "Table Closed", message: message.message || "All players have left the table." };
+  }
+  if (message.type === "leftLobby") {
+    state.game = null;
+    state.lobby = null;
+    state.screen = "title";
+    state.previous = [];
+    clearTimeout(endDialogTimer);
+    endDialogTimer = null;
+    state.modal = { type: "alert", title: "Left Lobby", message: message.message || "You left the lobby." };
   }
   render();
 }
@@ -643,15 +653,18 @@ function LobbySlot({ player, index }) {
   if (!player) {
     return h("div", { className: "player-slot empty" },
       h("span", null, `Seat ${index + 1}`),
-      (!state.lobby?.online || state.lobby?.isHost) ? h("button", { "data-action": "add-cpu" }, "Add CPU") : null
+      !state.lobby?.online ? h("button", { "data-action": "add-cpu" }, "Add CPU") : null
     );
   }
+  const canEjectPlayer = state.lobby?.online && state.lobby?.isHost && !player.local;
+  const canEjectCpu = !state.lobby?.online && player.ai;
   return h("div", { className: "player-slot" },
     h("div", null,
       h("strong", null, player.name),
       h("span", { className: "pill" }, player.ready ? "Ready" : "Waiting")
     ),
-    player.ai && (!state.lobby?.online || state.lobby?.isHost) ? h("button", { className: "eject", "data-action": "eject-cpu", "data-index": index, "data-player-id": player.id || "", "aria-label": `Eject ${player.name}` }, "Eject") : null
+    canEjectPlayer ? h("button", { className: "eject", "data-action": "eject-player", "data-player-id": player.id || "", "aria-label": `Eject ${player.name}` }, "Eject") : null,
+    canEjectCpu ? h("button", { className: "eject", "data-action": "eject-cpu", "data-index": index, "data-player-id": player.id || "", "aria-label": `Eject ${player.name}` }, "Eject") : null
   );
 }
 
@@ -866,7 +879,7 @@ function StackLayers({ stack }) {
 }
 
 function ActionBar({ game }) {
-  if (isReadyPhase(game) || !game.pendingAction) return null;
+  if (isReadyPhase(game) || !game.pendingAction || game.actionHoldUntil > Date.now()) return null;
   const action = game.pendingAction;
   if (action.type === "snapGive") {
     if (game.localPlayerIndex !== action.snappingPlayerIndex) return null;
@@ -893,7 +906,7 @@ function TableButton({ game }) {
     const ready = game.readyPlayers.has(game.localPlayerIndex);
     return h("div", { className: "table-button-row" }, h("button", { "data-action": "ready-game", disabled: ready }, "Ready"));
   }
-  if (!isLocalTurn(game) || game.actionHoldUntil > Date.now() || game.kabooBy !== null || game.kabooHold || game.pendingAction || game.heldCard || game.source || game.phase !== "playing") return null;
+  if (!isLocalTurn(game) || game.actionHoldUntil > Date.now() || game.kabooBy !== null || game.kabooHold || game.pendingAction || game.heldCard || game.source || game.actionTakenThisTurn || game.phase !== "playing") return null;
   return h("div", { className: "table-button-row" }, h("button", { className: "kaboo danger", "data-action": "kaboo" }, "KABOO"));
 }
 
@@ -1119,7 +1132,11 @@ function renderGame() {
 function renderTurnTitle(game, player, readyPhase) {
   if (game.kabooNotice && game.kabooNotice.expiresAt > Date.now()) return `${escapeHtml(game.players[game.kabooNotice.playerIndex].name)} called Kaboo!`;
   if (game.snapNotice && game.snapNotice.expiresAt > Date.now()) return `${escapeHtml(game.players[game.snapNotice.playerIndex].name)} Snapped!`;
-  if (game.phase === "complete" && game.winnerIndex !== undefined) return `${escapeHtml(game.players[game.winnerIndex].name)} ${game.players[game.winnerIndex].name === "You" ? "win" : "wins"}!`;
+  if (game.phase === "complete" && game.winnerIndex !== undefined) {
+    const winners = winningPlayers(game);
+    if (winners.length > 1) return "It's a Draw!";
+    return `${escapeHtml(game.players[game.winnerIndex].name)} ${game.players[game.winnerIndex].name === "You" ? "win" : "wins"}!`;
+  }
   if (game.phase === "revealing") return "Revealing cards";
   if (readyPhase) return "Memorize your cards";
   return isLocalTurn(game) ? "Your turn" : `${escapeHtml(player.name)}'s turn`;
@@ -1393,6 +1410,7 @@ function handleAction(action, target) {
   if (action === "toggle-ready") toggleReady();
   if (action === "add-cpu") addCpuToLobby();
   if (action === "eject-cpu") ejectCpuFromLobby(Number(target.dataset.index), target.dataset.playerId);
+  if (action === "eject-player") ejectPlayerFromLobby(target.dataset.playerId);
   if (action === "start-lobby-game") {
     if (isOnlineLobby()) sendRelay("startGame");
     else startGame(state.lobby.players);
@@ -1443,6 +1461,7 @@ function handleCardAction(action) {
   const [, playerIndexText, cardIndexText] = action.split(":");
   const playerIndex = Number(playerIndexText);
   const cardIndex = Number(cardIndexText);
+  if (game.pendingAction && game.actionHoldUntil > Date.now()) return;
   bloop("bloop");
   if (isOnlineGame(game)) {
     if (game.pendingAction?.type === "snapGive") {
@@ -1547,6 +1566,12 @@ function ejectCpuFromLobby(index, playerId = "") {
   const lobby = state.lobby;
   if (!lobby || !lobby.players[index]?.ai) return;
   lobby.players.splice(index, 1);
+}
+
+function ejectPlayerFromLobby(playerId = "") {
+  if (isOnlineLobby()) {
+    sendRelay("ejectPlayer", { playerId });
+  }
 }
 
 function togglePublic() {
@@ -1655,6 +1680,7 @@ function startGame(players) {
     source: null,
     selection: [],
     pendingAction: null,
+    actionTakenThisTurn: false,
     snappedCardIds: new Set(),
     phase: "ready",
     readyPlayers: new Set(gamePlayers.map((player, index) => player.ai ? index : -1).filter((index) => index >= 0)),
@@ -1734,6 +1760,7 @@ function drawDeck() {
   if (game.heldCard) return toast("Play or swap your held card first.");
   if (!ensureDeck()) return toast("No cards left to draw.");
   resetTurnTimer(game);
+  game.actionTakenThisTurn = true;
   game.heldCard = game.deck.pop();
   game.source = "deck";
   game.message = "Swap with one of your cards, or play it to the discard pile.";
@@ -1748,6 +1775,7 @@ function drawDiscard() {
   }
   if (!game.discard.length) return;
   resetTurnTimer(game);
+  game.actionTakenThisTurn = true;
   game.heldCard = game.discard.pop();
   game.source = "discard";
   game.message = "Swap the discard card with one of your cards.";
@@ -1857,7 +1885,7 @@ function handlePendingAction(playerIndex, cardIndex) {
     revealTemporarily(playerIndex, cardIndex);
     cancelAction(true);
   } else if (action.type === "blindSwap" || action.type === "kingSwap") {
-    action.picks.push({ playerIndex, cardIndex });
+    action.picks = [...(action.picks || []), { playerIndex, cardIndex }];
     game.selection = action.picks;
     if (action.picks.length === 2) {
       if (action.type === "blindSwap") {
@@ -2067,7 +2095,7 @@ function callKaboo() {
     sendGameIntent("kaboo");
     return;
   }
-  if ((!canHumanAct() && !game.players[game.currentPlayer]?.ai) || game.kabooBy !== null) return;
+  if ((!canHumanAct() && !game.players[game.currentPlayer]?.ai) || game.kabooBy !== null || game.actionTakenThisTurn) return;
   game.kabooBy = game.currentPlayer;
   game.kabooHold = true;
   game.players[game.currentPlayer].protected = true;
@@ -2098,6 +2126,7 @@ function endTurn() {
   game.source = null;
   game.pendingAction = null;
   game.selection = [];
+  game.actionTakenThisTurn = false;
   if (game.finalTurns) {
     game.finalTurns.delete(game.currentPlayer);
     if (game.finalTurns.size === 0) return finishGame();
@@ -2118,9 +2147,11 @@ function advanceCurrentPlayer() {
 
 function finishGame() {
   const game = state.game;
-  const winner = game.players.map((p, i) => ({ i, score: handScore(p.cards) })).sort((a, b) => a.score - b.score)[0];
-  game.players[winner.i].wins = (game.players[winner.i].wins || 0) + 1;
-  game.winnerIndex = winner.i;
+  const winners = winningPlayers(game);
+  winners.forEach((winner) => {
+    game.players[winner.i].wins = (game.players[winner.i].wins || 0) + 1;
+  });
+  game.winnerIndex = winners[0].i;
   game.phase = "revealing";
   game.message = "Revealing every hand.";
   game.heldCard = null;
@@ -2143,7 +2174,7 @@ function finishGame() {
     clearHiddenSlots(game);
     game.animationLock = false;
     game.phase = "complete";
-    game.message = `${game.players[winner.i].name} Wins!`;
+    game.message = winners.length > 1 ? "It's a Draw!" : `${game.players[winners[0].i].name} Wins!`;
     bloop("streamer");
     render();
     setTimeout(() => {
@@ -2272,7 +2303,7 @@ function shouldAiPickDiscard(playerIndex) {
 
 function shouldAiCallKaboo(playerIndex) {
   const game = state.game;
-  if (game.kabooBy !== null || game.heldCard || game.finalTurns) return false;
+  if (game.kabooBy !== null || game.heldCard || game.finalTurns || game.actionTakenThisTurn) return false;
   const player = game.players[playerIndex];
   const score = estimatedHandScoreFor(player);
   const confidence = knownCardCount(player) / Math.max(1, player.cards.filter(Boolean).length);
@@ -2653,6 +2684,12 @@ function shouldAiSnapCandidate(aiPlayer, snappingPlayerIndex, ownerIndex, target
 
 function handScore(cards) {
   return cards.reduce((sum, card) => sum + (card ? cardValue(card) : 0), 0);
+}
+
+function winningPlayers(game) {
+  const scores = game.players.map((p, i) => ({ i, score: handScore(p.cards) })).sort((a, b) => a.score - b.score);
+  const lowest = scores[0]?.score ?? 0;
+  return scores.filter((item) => item.score === lowest);
 }
 
 function cardValue(card) {
