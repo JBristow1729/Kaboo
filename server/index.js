@@ -9,6 +9,8 @@ const READY_SECONDS = 30;
 const LOOK_MS = 4000;
 const MOVE_MS = 3200;
 const SNAP_MOVE_MS = 2200;
+const FINAL_SNAP_WINDOW_MS = 4000;
+const REPLAY_SECONDS = 30;
 const MAX_PLAYERS = 8;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = [
@@ -98,8 +100,7 @@ function handleMessage(client, message) {
   if (type === "startGame") return mutateLobby(client, (room) => startGame(room, client));
   if (type === "gameIntent") return mutateGame(client, (room, game, playerIndex) => handleGameIntent(room, game, playerIndex, payload));
   if (type === "playAgain") return mutateLobby(client, (room) => {
-    setPlayerReady(room, client.playerId, true);
-    if (room.players.filter((p) => !p.left).every((p) => p.ready)) startGame(room, { id: room.hostClientId });
+    chooseReplay(room, client, "again");
   });
 }
 
@@ -167,6 +168,63 @@ function mutateGame(client, fn) {
 function setPlayerReady(room, playerId, ready) {
   const player = room.players.find((p) => p.id === playerId);
   if (player) player.ready = ready;
+}
+
+function chooseReplay(room, client, choice) {
+  if (!room.game || room.game.phase !== "complete") {
+    if (choice === "again") setPlayerReady(room, client.playerId, true);
+    return;
+  }
+  const player = room.players.find((p) => p.id === client.playerId && !p.left);
+  if (!player) return;
+  player.replayChoice = choice;
+  if (choice === "again") {
+    player.ready = true;
+  } else {
+    player.left = true;
+    client.roomCode = null;
+    client.playerId = null;
+  }
+  resolveReplayIfReady(room);
+}
+
+function resolveReplayIfReady(room, force = false) {
+  const game = room.game;
+  if (!game || game.phase !== "complete") return false;
+  const active = room.players.filter((p) => !p.left && !p.ai);
+  const decided = active.every((p) => p.replayChoice);
+  if (!force && !decided) return false;
+  const staying = active.filter((p) => p.replayChoice === "again");
+  if (staying.length < 2) {
+    for (const other of clients.values()) {
+      if (other.roomCode === room.code) {
+        send(other, "tableClosed", { message: "Not enough players chose to play again." });
+        other.roomCode = null;
+        other.playerId = null;
+      }
+    }
+    rooms.delete(room.code);
+    return true;
+  }
+  const stayingIds = new Set(staying.map((p) => p.id));
+  for (const other of clients.values()) {
+    if (other.roomCode === room.code && !stayingIds.has(other.playerId)) {
+      send(other, "leftLobby", { message: "The replay table moved on without you." });
+      other.roomCode = null;
+      other.playerId = null;
+    }
+  }
+  room.players = room.players.filter((p) => stayingIds.has(p.id));
+  room.players.forEach((p) => {
+    p.left = false;
+    p.ready = true;
+    p.replayChoice = null;
+  });
+  if (!room.players.some((p) => p.clientId === room.hostClientId)) {
+    room.hostClientId = room.players.find((p) => !p.ai)?.clientId || room.hostClientId;
+  }
+  startGame(room, { id: room.hostClientId });
+  return true;
 }
 
 function addCpu(room, client) {
@@ -266,12 +324,15 @@ function handleGameIntent(room, game, playerIndex, intent) {
     return;
   }
   if (intent.action === "snap") return attemptSnap(game, playerIndex, Number(intent.ownerIndex), Number(intent.cardIndex));
+  if (game.finalSnapUntil) return;
   if (game.currentPlayer !== playerIndex) return;
+  if (!canTakeTurn(game, playerIndex)) return;
   if (game.actionHoldUntil && Date.now() < game.actionHoldUntil) return;
   resetTurnTimer(game);
   if (intent.action === "kaboo") return callKaboo(game, playerIndex);
   if (intent.action === "drawDeck") return drawDeck(game, playerIndex);
   if (intent.action === "drawDiscard") return drawDiscard(game, playerIndex);
+  if (intent.action === "returnDiscard") return returnDiscard(game, playerIndex);
   if (intent.action === "playHeld") return playHeld(game, playerIndex);
   if (intent.action === "swapHeld") return swapHeld(game, playerIndex, Number(intent.cardIndex));
   if (intent.action === "cardAction") return handlePendingCard(room, game, playerIndex, Number(intent.targetPlayerIndex), Number(intent.cardIndex));
@@ -289,7 +350,28 @@ function tickGame(room, now) {
     broadcastGame(room);
     return;
   }
+  if (game.phase === "complete") {
+    if (game.leaveAt && now >= game.leaveAt && resolveReplayIfReady(room, true)) {
+      broadcastPublicLobbies();
+      return;
+    }
+    return;
+  }
   if (game.phase !== "playing") return;
+  if (game.finalSnapUntil) {
+    if (now >= game.finalSnapUntil) {
+      if (game.pendingAction?.type === "snapGive" || (game.animations || []).length) return;
+      game.finalSnapUntil = null;
+      finishGame(game);
+      broadcastGame(room);
+    }
+    return;
+  }
+  if (!canTakeTurn(game, game.currentPlayer)) {
+    endTurn(game);
+    broadcastGame(room);
+    return;
+  }
   if (game.actionHoldUntil && now < game.actionHoldUntil) return;
   if (game.pendingAction?.type === "snapGive") return;
   const current = game.players[game.currentPlayer];
@@ -329,6 +411,16 @@ function drawDiscard(game, playerIndex) {
   game.source = "discard";
   rememberCard(game.players[playerIndex], game.heldCard);
   game.message = "Swap the discard card with one of your cards.";
+}
+
+function returnDiscard(game, playerIndex) {
+  if (!game.heldCard || game.source !== "discard" || game.heldBy !== playerIndex) return;
+  game.discard.push(game.heldCard);
+  rememberDiscard(game, game.heldCard);
+  game.heldCard = null;
+  game.heldBy = null;
+  game.source = null;
+  game.message = "Draw from the deck or pick up the discard pile.";
 }
 
 function swapHeld(game, playerIndex, cardIndex) {
@@ -412,7 +504,7 @@ function handlePendingCard(room, game, playerIndex, targetPlayerIndex, cardIndex
   }
   if (game.currentPlayer !== playerIndex) return;
   const target = game.players[targetPlayerIndex];
-  if (!target?.cards[cardIndex]) return;
+  if (target?.left || !target?.cards[cardIndex]) return;
   if (target.protected && targetPlayerIndex !== playerIndex) {
     game.message = "This player is protected.";
     return;
@@ -459,9 +551,8 @@ function attemptSnap(game, snappingPlayerIndex, ownerIndex, cardIndex) {
   const owner = game.players[ownerIndex];
   const target = owner?.cards[cardIndex];
   const top = last(game.discard);
-  if (!snapper || !owner || owner.protected || !target || !top) return;
+  if (!snapper || !owner || snapper.left || owner.left || owner.protected || !target || !top) return;
   if (game.snappedCardIds.has(target.id) || game.snapLockedDiscardId === top.id) return;
-  game.snapLockedDiscardId = top.id;
   game.notice = { kind: "snap", playerIndex: snappingPlayerIndex, expiresAt: Date.now() + 1800 };
   if (target.rank === top.rank) {
     game.snappedCardIds.add(target.id);
@@ -485,6 +576,7 @@ function attemptSnap(game, snappingPlayerIndex, ownerIndex, cardIndex) {
     }
     game.log.push(`${snapper.name} missed a snap and took a penalty card.`);
   }
+  game.snapLockedDiscardId = last(game.discard)?.id || top.id;
 }
 
 function giveSnapCard(game, giveIndex) {
@@ -545,13 +637,26 @@ function endTurn(game) {
   }
   if (game.finalTurns) {
     game.finalTurns.delete(game.currentPlayer);
-    if (game.finalTurns.size === 0) return finishGame(game);
+    if (game.finalTurns.size === 0) return beginFinalSnapWindow(game);
   }
   do {
     game.currentPlayer = (game.currentPlayer + 1) % game.players.length;
-  } while (game.players[game.currentPlayer].protected && game.finalTurns);
+  } while (!canTakeTurn(game, game.currentPlayer));
   game.message = "Draw from the deck or pick up the discard pile.";
   resetTurnTimer(game);
+}
+
+function beginFinalSnapWindow(game) {
+  game.heldCard = null;
+  game.heldBy = null;
+  game.source = null;
+  game.pendingAction = null;
+  game.selection = [];
+  game.finalTurns = null;
+  game.finalSnapUntil = Date.now() + FINAL_SNAP_WINDOW_MS;
+  game.message = "Final snaps.";
+  game.turnEndsAt = game.finalSnapUntil;
+  game.actionHoldUntil = 0;
 }
 
 function scheduleEndTurn(game, delay = 0) {
@@ -568,6 +673,12 @@ function scheduleEndTurn(game, delay = 0) {
 
 function finishGame(game) {
   const room = rooms.get(game.roomCode);
+  if (room) {
+    room.players.forEach((player) => {
+      player.replayChoice = "";
+      player.ready = false;
+    });
+  }
   const scores = game.players.map((p, i) => ({ i, score: handScore(p.cards) })).sort((a, b) => a.score - b.score);
   const lowest = scores[0].score;
   const winners = scores.filter((item) => item.score === lowest);
@@ -589,7 +700,7 @@ function finishGame(game) {
     if (!room || room.game !== game) return;
     game.phase = "complete";
     game.message = winners.length > 1 ? "It's a Draw!" : `${game.players[winners[0].i].name} Wins!`;
-    game.leaveAt = Date.now() + 30000;
+    game.leaveAt = Date.now() + REPLAY_SECONDS * 1000;
     broadcastGame(room);
   }, 5800);
 }
@@ -722,6 +833,7 @@ function gameView(game, client) {
     readyPlayers: Array.from(game.readyPlayers),
     readyEndsAt: game.readyEndsAt,
     turnEndsAt: game.turnEndsAt,
+    finalSnapUntil: game.finalSnapUntil || 0,
     actionHoldUntil: game.actionHoldUntil || 0,
     kabooBy: game.kabooBy,
     kabooHold: false,
@@ -729,7 +841,8 @@ function gameView(game, client) {
     message: game.message,
     log: game.log.slice(-80),
     winnerIndex: game.winnerIndex,
-    leaveAt: game.leaveAt
+    leaveAt: game.leaveAt,
+    replayChoices: room.players.filter((p) => !p.left).map((p) => ({ playerId: p.id, name: p.name, choice: p.replayChoice || "" }))
   };
 }
 
@@ -815,6 +928,10 @@ function leaveRoom(client) {
   const room = rooms.get(client.roomCode);
   if (!room) return;
   if (room.game) {
+    if (room.game.phase === "complete") {
+      chooseReplay(room, client, "leave");
+      return;
+    }
     leaveActiveGame(room, client);
     return;
   }
@@ -1019,7 +1136,7 @@ function rememberDiscard(game, card) {
 }
 
 function hasUnprotectedOpponent(game, playerIndex) {
-  return game.players.some((player, index) => index !== playerIndex && !player.protected);
+  return game.players.some((player, index) => index !== playerIndex && !player.left && !player.protected);
 }
 
 function allReady(game) {
@@ -1082,7 +1199,14 @@ function leastCertainOwnCardIndex(player) {
 }
 
 function nextOpponentIndex(game, playerIndex) {
-  return game.players.findIndex((p, index) => index !== playerIndex && !p.protected);
+  return game.players.findIndex((p, index) => index !== playerIndex && !p.left && !p.protected);
+}
+
+function canTakeTurn(game, playerIndex) {
+  const player = game.players[playerIndex];
+  if (!player || player.left) return false;
+  if (game.finalTurns && player.protected) return false;
+  return true;
 }
 
 function shouldAiPickDiscard(game, playerIndex) {

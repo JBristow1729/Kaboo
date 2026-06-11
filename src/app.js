@@ -15,6 +15,7 @@ const SNAP_ANIMATION_CUTOFF_MS = 800;
 const COMMIT_AFTER_MOVE_MS = MOVE_MS - ANIMATION_CUTOFF_MS;
 const SNAP_MOVE_MS = 2200;
 const SNAP_COMMIT_AFTER_MOVE_MS = SNAP_MOVE_MS - SNAP_ANIMATION_CUTOFF_MS;
+const FINAL_SNAP_WINDOW_MS = 4000;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = [
   { id: "S", glyph: "&spades;", color: "black" },
@@ -370,6 +371,11 @@ function handleRootClick(event) {
   const cardTarget = event.target.closest?.("[data-card-action]");
   if (!cardTarget || cardTarget.disabled) return;
   const action = cardTarget.dataset.cardAction;
+  if (action === "held-discard" && state.game?.heldCard && state.game.source === "discard" && isLocalTurn(state.game)) {
+    returnDiscardHeld();
+    render();
+    return;
+  }
   if (action === "discard" && state.game?.discard.length && canHumanAct() && !state.game.heldCard) {
     drawDiscard();
     render();
@@ -848,6 +854,7 @@ function HandView({ player, playerIndex, game }) {
   const klass = isLocalPlayerIndex(playerIndex, game) ? "hand me" : "hand";
   const style = isLocalPlayerIndex(playerIndex, game) ? undefined : { left: `${position.left}%`, top: `${position.top}%` };
   return h("div", { className: klass, style, title: player.name },
+    h("div", { className: "hand-label" }, player.name),
     player.cards.map((card, cardIndex) => {
       const visible = isCardVisible(game, playerIndex, cardIndex);
       const selected = game.selection.some((s) => s.playerIndex === playerIndex && s.cardIndex === cardIndex);
@@ -912,6 +919,9 @@ function TableButton({ game }) {
 
 function EndDialog() {
   const game = state.game;
+  const replayChoices = game.replayChoices || [];
+  const localPlayer = game.players[game.localPlayerIndex];
+  const localChoice = replayChoices.find((choice) => choice.playerId === localPlayer?.id)?.choice || "";
   const rows = game.players.map((p) => ({ ...p, score: handScore(p.cards) })).sort((a, b) => a.score - b.score);
   const lowestScore = rows[0]?.score ?? 0;
   const winners = rows.filter((p) => p.score === lowestScore);
@@ -925,11 +935,29 @@ function EndDialog() {
         h("thead", null, h("tr", null, h("th", null, "Player"), h("th", null, "Score"), h("th", null, "Cards"))),
         h("tbody", null, rows.map((p) => h("tr", { key: p.name }, h("td", null, p.name), h("td", null, p.score), h("td", null, handLabels(p.cards)))))
       ),
-      h(EndCountdown, { leaveAt: game.leaveAt }),
-      h("div", { className: "dialog-actions" },
-        h("button", { className: "ghost", "data-action": "leave-table" }, "Leave"),
-        h("button", { "data-action": "play-again" }, "Play Again")
+      localChoice === "again" ? h(ReplayWaiting, { game, replayChoices }) : h(React.Fragment, null,
+        h(EndCountdown, { leaveAt: game.leaveAt }),
+        h("div", { className: "dialog-actions" },
+          h("button", { className: "ghost", "data-action": "leave-table" }, "Leave"),
+          h("button", { "data-action": "play-again" }, "Play Again")
+        )
       )
+    )
+  );
+}
+
+function ReplayWaiting({ game, replayChoices }) {
+  return h("div", { className: "replay-waiting" },
+    h("h3", null, "Waiting for other players"),
+    h(EndCountdown, { leaveAt: game.leaveAt }),
+    h("div", { className: "replay-list" },
+      replayChoices.map((choice) => h("div", { key: choice.playerId, className: "replay-row" },
+        h("span", null, choice.name),
+        h("span", null, choice.choice === "again" ? "Playing again" : "Deciding")
+      ))
+    ),
+    h("div", { className: "dialog-actions" },
+      h("button", { className: "ghost", "data-action": "leave-table" }, "Leave")
     )
   );
 }
@@ -1137,6 +1165,7 @@ function renderTurnTitle(game, player, readyPhase) {
     if (winners.length > 1) return "It's a Draw!";
     return `${escapeHtml(game.players[game.winnerIndex].name)} ${game.players[game.winnerIndex].name === "You" ? "win" : "wins"}!`;
   }
+  if (game.finalSnapUntil) return "Final snaps!";
   if (game.phase === "revealing") return "Revealing cards";
   if (readyPhase) return "Memorize your cards";
   return isLocalTurn(game) ? "Your turn" : `${escapeHtml(player.name)}'s turn`;
@@ -1212,6 +1241,7 @@ function renderHand(player, playerIndex, game) {
   const style = isLocalPlayerIndex(playerIndex, game) ? "" : `style="left:${position.left}%;top:${position.top}%"`;
   return `
     <div class="${klass}" ${style} title="${escapeHtml(player.name)}">
+      <div class="hand-label">${escapeHtml(player.name)}</div>
       ${player.cards.map((card, cardIndex) => {
         const visible = isCardVisible(game, playerIndex, cardIndex);
         const selected = game.selection.some((s) => s.playerIndex === playerIndex && s.cardIndex === cardIndex);
@@ -1689,6 +1719,7 @@ function startGame(players) {
     kabooBy: null,
     kabooHold: false,
     finalTurns: null,
+    finalSnapUntil: 0,
     message: "Memorize your bottom two cards.",
     log: ["Cards dealt. AI players are ready. Ready up when you have memorized your cards."]
   };
@@ -1735,7 +1766,7 @@ function beginTurns(game = state.game) {
 }
 
 function hasUnprotectedOpponent(playerIndex, game = state.game) {
-  return Boolean(game?.players.some((player, index) => index !== playerIndex && !player.protected));
+  return Boolean(game?.players.some((player, index) => index !== playerIndex && !player.left && !player.protected));
 }
 
 function makeDeck() {
@@ -1779,6 +1810,20 @@ function drawDiscard() {
   game.heldCard = game.discard.pop();
   game.source = "discard";
   game.message = "Swap the discard card with one of your cards.";
+}
+
+function returnDiscardHeld() {
+  const game = state.game;
+  if (!game?.heldCard || game.source !== "discard" || !isLocalTurn(game)) return;
+  if (isOnlineGame(game)) {
+    sendGameIntent("returnDiscard");
+    return;
+  }
+  game.discard.push(game.heldCard);
+  rememberDiscard(game.heldCard);
+  game.heldCard = null;
+  game.source = null;
+  game.message = "Draw from the deck or pick up the discard pile.";
 }
 
 function swapHeldWithOwn(cardIndex) {
@@ -1874,6 +1919,7 @@ function handlePendingAction(playerIndex, cardIndex) {
   const game = state.game;
   const action = game.pendingAction;
   resetTurnTimer(game);
+  if (game.players[playerIndex]?.left) return;
   if (game.players[playerIndex]?.protected && playerIndex !== game.currentPlayer) {
     toast("This player is protected.");
     return;
@@ -1977,13 +2023,13 @@ function attemptSnap(snappingPlayerIndex, ownerIndex, cardIndex) {
   cancelQueuedAiActions();
   const snapper = game.players[snappingPlayerIndex];
   const owner = game.players[ownerIndex];
+  if (snapper?.left || owner?.left) return;
   if (owner.protected) return toast("That hand is locked.");
   const target = owner.cards[cardIndex];
   if (!target || game.snappedCardIds.has(target.id)) return toast("That card has already been snapped.");
   const top = last(game.discard);
   if (!top) return;
   if (game.snapLockedDiscardId === top.id) return toast("Snap has already been attempted.");
-  game.snapLockedDiscardId = top.id;
   if (target.rank === top.rank) {
     game.snappedCardIds.add(target.id);
     hideSlot(ownerIndex, cardIndex, game);
@@ -1993,7 +2039,7 @@ function attemptSnap(snappingPlayerIndex, ownerIndex, cardIndex) {
       if (state.game !== game) return;
       clearAnimations(game);
       game.discard.push(target);
-      game.snapLockedDiscardId = target.id;
+      game.snapLockedDiscardId = last(game.discard)?.id || top.id;
       rememberDiscard(target);
       owner.cards[cardIndex] = null;
       clearAnimations(game);
@@ -2037,6 +2083,7 @@ function attemptSnap(snappingPlayerIndex, ownerIndex, cardIndex) {
         if (state.game !== game) return;
         clearAnimations(game);
         game.animationLock = false;
+        game.snapLockedDiscardId = last(game.discard)?.id || top.id;
         clearHiddenSlots(game);
         clearHiddenPiles(game);
         game.log.push(`${snapper.name} missed a snap and took a penalty card.`);
@@ -2129,7 +2176,7 @@ function endTurn() {
   game.actionTakenThisTurn = false;
   if (game.finalTurns) {
     game.finalTurns.delete(game.currentPlayer);
-    if (game.finalTurns.size === 0) return finishGame();
+    if (game.finalTurns.size === 0) return beginFinalSnapWindow();
   }
   advanceCurrentPlayer();
   resetTurnTimer(game);
@@ -2138,11 +2185,32 @@ function endTurn() {
   scheduleAiTurn();
 }
 
+function beginFinalSnapWindow() {
+  const game = state.game;
+  game.heldCard = null;
+  game.source = null;
+  game.pendingAction = null;
+  game.selection = [];
+  game.finalTurns = null;
+  game.finalSnapUntil = Date.now() + FINAL_SNAP_WINDOW_MS;
+  game.turnEndsAt = game.finalSnapUntil;
+  game.message = "Final snaps.";
+  cancelQueuedAiActions();
+  scheduleAiSnap();
+}
+
 function advanceCurrentPlayer() {
   const game = state.game;
   do {
     game.currentPlayer = (game.currentPlayer + 1) % game.players.length;
-  } while (game.players[game.currentPlayer].protected && game.finalTurns);
+  } while (!canTakeTurn(game, game.currentPlayer));
+}
+
+function canTakeTurn(game, playerIndex) {
+  const player = game.players[playerIndex];
+  if (!player || player.left) return false;
+  if (game.finalTurns && player.protected) return false;
+  return true;
 }
 
 function finishGame() {
@@ -2379,7 +2447,7 @@ function chooseAiSwapPlan(aiIndex) {
 
 function nextOpponentIndex() {
   const game = state.game;
-  return game.players.findIndex((p, i) => i !== game.currentPlayer && !p.protected);
+  return game.players.findIndex((p, i) => i !== game.currentPlayer && !p.left && !p.protected);
 }
 
 function randomIndex(array) {
@@ -2393,6 +2461,7 @@ function canHumanAct() {
   if (!game || !isLocalTurn(game)) return false;
   if (game.actionHoldUntil > Date.now()) return false;
   if (isAnimating(game)) return false;
+  if (game.finalSnapUntil) return false;
   if (isReadyPhase(game) || game.phase === "revealing" || game.phase === "complete") return false;
   return true;
 }
@@ -2461,6 +2530,13 @@ function startTicker() {
           beginTurns(game);
           needsRender = true;
         }
+      } else if (game.finalSnapUntil) {
+        if (Date.now() >= game.finalSnapUntil) {
+          if (game.pendingAction?.type === "snapGive" || game.animations.length || game.animationLock) return;
+          game.finalSnapUntil = 0;
+          finishGame();
+          needsRender = true;
+        }
       } else if (!game.kabooHold) {
         playTimerWarning(game);
         if (Date.now() >= game.turnEndsAt) {
@@ -2477,7 +2553,7 @@ function startTicker() {
       }
       if (hadAnimations && game.animations.length > 0) return;
     }
-    if (state.modal?.type === "end" && state.game?.leaveAt && Date.now() >= state.game.leaveAt) {
+    if (state.modal?.type === "end" && state.game?.leaveAt && Date.now() >= state.game.leaveAt && !isOnlineGame(state.game)) {
       state.modal = null;
       state.game = null;
       state.screen = "title";
@@ -2490,7 +2566,7 @@ function startTicker() {
 function scheduleAiTurn() {
   if (aiTimer) clearTimeout(aiTimer);
   const game = state.game;
-  if (!game || game.kabooHold || isReadyPhase(game) || game.phase === "revealing" || game.phase === "complete" || isLocalTurn(game) || isAnimating(game) || game.pendingAction || state.modal?.type === "end") return;
+  if (!game || game.kabooHold || game.finalSnapUntil || isReadyPhase(game) || game.phase === "revealing" || game.phase === "complete" || isLocalTurn(game) || isAnimating(game) || game.pendingAction || state.modal?.type === "end") return;
   const delay = 2000 + Math.floor(Math.random() * 2000);
   aiTimer = setTimeout(() => {
     aiTimer = null;
@@ -2646,7 +2722,7 @@ function scheduleAiSnap() {
   game.players.forEach((player, snappingPlayerIndex) => {
     if (!player.ai) return;
     game.players.forEach((owner, ownerIndex) => {
-      if (owner.protected) return;
+      if (owner.left || owner.protected) return;
       owner.cards.forEach((card, cardIndex) => {
         if (
           card &&

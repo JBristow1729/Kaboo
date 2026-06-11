@@ -248,6 +248,34 @@ select:focus {
   font-size: 2rem;
 }
 
+.replay-waiting {
+  display: grid;
+  gap: 14px;
+}
+
+.replay-waiting h3 {
+  margin: 4px 0 0;
+  color: var(--chalk);
+}
+
+.replay-list {
+  display: grid;
+  gap: 8px;
+}
+
+.replay-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.replay-row span:last-child {
+  color: var(--gold);
+  font-weight: 800;
+}
+
 .field {
   display: grid;
   gap: 8px;
@@ -504,6 +532,27 @@ select:focus {
   grid-auto-rows: var(--card-h);
   gap: 8px;
   transform: translate(-50%, -50%);
+}
+
+.hand-label {
+  position: absolute;
+  left: 50%;
+  top: -28px;
+  transform: translateX(-50%);
+  padding: 3px 9px;
+  border: 1px solid rgba(245, 234, 209, 0.22);
+  border-radius: 999px;
+  background: rgba(3, 14, 10, 0.78);
+  color: var(--chalk);
+  font-weight: 900;
+  font-size: 0.82rem;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.hand.me .hand-label {
+  top: -30px;
 }
 
 .hand.me {
