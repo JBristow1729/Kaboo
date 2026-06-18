@@ -610,6 +610,10 @@ select:focus {
   z-index: 4;
 }
 
+.card.selected:hover {
+  transform: scale(1.15);
+}
+
 .pile-card {
   position: relative;
 }
@@ -981,6 +985,10 @@ select:focus {
   color: var(--red);
 }
 
+.flying-card.stationary {
+  animation: card-inspect var(--duration, 3200ms) ease forwards;
+}
+
 @keyframes card-flight {
   0% {
     opacity: 0.95;
@@ -999,6 +1007,27 @@ select:focus {
     left: var(--to-x);
     top: var(--to-y);
     transform: translate(-50%, -50%) scale(0.92) rotate(0deg);
+  }
+}
+
+@keyframes card-inspect {
+  0% {
+    opacity: 0.96;
+    left: var(--from-x);
+    top: var(--from-y);
+    transform: translate(-50%, -50%) scale(0.96);
+  }
+  18%, 82% {
+    opacity: 1;
+    left: var(--from-x);
+    top: var(--from-y);
+    transform: translate(-50%, -50%) scale(1.16);
+  }
+  100% {
+    opacity: 0.96;
+    left: var(--from-x);
+    top: var(--from-y);
+    transform: translate(-50%, -50%) scale(0.96);
   }
 }
 

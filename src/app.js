@@ -16,6 +16,7 @@ const COMMIT_AFTER_MOVE_MS = MOVE_MS - ANIMATION_CUTOFF_MS;
 const SNAP_MOVE_MS = 2200;
 const SNAP_COMMIT_AFTER_MOVE_MS = SNAP_MOVE_MS - SNAP_ANIMATION_CUTOFF_MS;
 const FINAL_SNAP_WINDOW_MS = 4000;
+const LOOK_MS = 4000;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = [
   { id: "S", glyph: "&spades;", color: "black" },
@@ -266,6 +267,7 @@ function hydrateAnimation(animation, game) {
     expiresAt: localExpiresAt,
     from,
     to,
+    stationary: animation.stationary ?? targetsMatch(animation.fromTarget || animation.from, animation.toTarget || animation.to),
     mid: {
       x: (from.x + to.x) / 2,
       y: (from.y + to.y) / 2
@@ -821,7 +823,7 @@ function DiscardPile({ game }) {
 function AnimationLayer({ animations }) {
   return h(React.Fragment, null, (animations || []).map((animation) => h("div", {
     key: animation.id,
-    className: `flying-card ${animation.red ? "red" : ""}`,
+    className: `flying-card ${animation.red ? "red" : ""} ${animation.stationary ? "stationary" : ""}`,
     style: {
       "--from-x": `${animation.from.x}%`,
       "--from-y": `${animation.from.y}%`,
@@ -1925,11 +1927,9 @@ function handlePendingAction(playerIndex, cardIndex) {
     return;
   }
   if (action.type === "ownPeek" && playerIndex === game.currentPlayer) {
-    revealTemporarily(playerIndex, cardIndex);
-    cancelAction(true);
+    holdPeekAction(playerIndex, cardIndex);
   } else if (action.type === "opponentPeek" && playerIndex !== game.currentPlayer) {
-    revealTemporarily(playerIndex, cardIndex);
-    cancelAction(true);
+    holdPeekAction(playerIndex, cardIndex);
   } else if (action.type === "blindSwap" || action.type === "kingSwap") {
     action.picks = [...(action.picks || []), { playerIndex, cardIndex }];
     game.selection = action.picks;
@@ -1946,6 +1946,25 @@ function handlePendingAction(playerIndex, cardIndex) {
       }
     }
   }
+}
+
+function holdPeekAction(playerIndex, cardIndex, duration = LOOK_MS) {
+  const game = state.game;
+  if (!game) return;
+  const card = game.players[playerIndex]?.cards[cardIndex];
+  if (!card) return;
+  game.selection = [{ playerIndex, cardIndex }];
+  revealTemporarily(playerIndex, cardIndex, duration);
+  game.actionHoldUntil = Math.max(game.actionHoldUntil || 0, Date.now() + duration);
+  setTimeout(() => {
+    if (state.game !== game) return;
+    clearVisiblePicks([{ playerIndex, cardIndex }], game);
+    game.pendingAction = null;
+    game.selection = [];
+    game.actionHoldUntil = 0;
+    endTurn();
+    render();
+  }, duration);
 }
 
 function confirmKingSwap() {
@@ -2310,11 +2329,11 @@ function aiResolveAction() {
   if (!action) return;
   if (action.type === "ownPeek") {
     const cardIndex = leastCertainOwnCardIndex(game.players[game.currentPlayer]);
-    if (cardIndex >= 0) revealTemporarily(game.currentPlayer, cardIndex);
+    if (cardIndex >= 0) return holdPeekAction(game.currentPlayer, cardIndex);
   } else if (action.type === "opponentPeek") {
     const opponent = mostThreateningOpponentIndex(game.currentPlayer);
     const cardIndex = opponent >= 0 ? leastKnownOpponentCardIndex(game.players[game.currentPlayer], game.players[opponent]) : -1;
-    if (cardIndex >= 0) revealTemporarily(opponent, cardIndex);
+    if (cardIndex >= 0) return holdPeekAction(opponent, cardIndex);
   } else if (action.type === "blindSwap" || action.type === "kingSwap") {
     const plan = chooseAiSwapPlan(game.currentPlayer);
     if (plan && (action.type === "blindSwap" || plan.margin > 2 || Math.random() > 0.25)) {
@@ -2599,6 +2618,7 @@ function addAnimation(from, to, card, options = {}) {
     id,
     from: positionForTarget(from),
     to: positionForTarget(to),
+    stationary: targetsMatch(from, to),
     startFace,
     endFace,
     red: card?.suit?.color === "red",
@@ -2620,6 +2640,12 @@ function addAnimation(from, to, card, options = {}) {
     game.animations = game.animations.filter((item) => item.id !== id);
     if (before !== game.animations.length && !game.animationLock) render();
   }, visibleDuration);
+}
+
+function targetsMatch(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  return a.playerIndex === b.playerIndex && a.cardIndex === b.cardIndex;
 }
 
 function clearAnimations(game = state.game) {

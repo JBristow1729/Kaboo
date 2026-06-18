@@ -864,6 +864,7 @@ function animationView(animation, client) {
     id: animation.id,
     fromTarget: animation.from,
     toTarget: animation.to,
+    stationary: Boolean(animation.stationary),
     startFace,
     endFace,
     red: expose && animation.card?.suit?.color === "red",
@@ -1039,40 +1040,21 @@ function revealTo(game, playerIndex, card, duration) {
 function revealForAction(room, game, viewingPlayerIndex, targetPlayerIndex, cardIndex, advanceAfter) {
   const card = game.players[targetPlayerIndex]?.cards[cardIndex];
   if (!card) return;
-  const viewerId = game.players[viewingPlayerIndex].id;
-  revealTo(game, viewingPlayerIndex, card, LOOK_MS);
-  pushAnimation(game, { playerIndex: targetPlayerIndex, cardIndex }, { playerIndex: targetPlayerIndex, cardIndex }, card, {
-    startFace: "down",
-    endFace: "up",
-    startVisibleTo: [],
-    endVisibleTo: [viewerId],
-    duration: LOOK_MS
-  });
-  setTimeout(() => {
-    if (room.game !== game) return;
-    pushAnimation(game, { playerIndex: targetPlayerIndex, cardIndex }, { playerIndex: targetPlayerIndex, cardIndex }, card, {
-      startFace: "up",
-      endFace: "down",
-      startVisibleTo: [viewerId],
-      endVisibleTo: [],
-      duration: 1500
-    });
-    clearVisiblePicks(game, [{ playerIndex: targetPlayerIndex, cardIndex }]);
-    if (advanceAfter) {
+  const pick = { playerIndex: targetPlayerIndex, cardIndex };
+  const duration = advanceAfter ? LOOK_MS : 30000;
+  revealTo(game, viewingPlayerIndex, card, duration);
+  if (advanceAfter) game.selection = [pick];
+  if (advanceAfter) {
+    game.actionHoldUntil = Math.max(game.actionHoldUntil || 0, Date.now() + duration);
+    setTimeout(() => {
+      if (room.game !== game) return;
+      clearVisiblePicks(game, [pick]);
       game.pendingAction = null;
       game.selection = [];
-      setTimeout(() => {
-        if (room.game !== game) return;
-        endTurn(game);
-        broadcastGame(room);
-      }, 1500);
-    }
-    broadcastGame(room);
-  }, LOOK_MS);
-  game.actionHoldUntil = Math.max(game.actionHoldUntil || 0, Date.now() + LOOK_MS + (advanceAfter ? 1500 : 0));
-  if (advanceAfter) {
-    game.pendingAction = null;
-    game.selection = [];
+      game.actionHoldUntil = 0;
+      endTurn(game);
+      broadcastGame(room);
+    }, duration);
   }
 }
 
@@ -1084,6 +1066,7 @@ function pushAnimation(game, from, to, card, options = {}) {
     from,
     to,
     card,
+    stationary: targetsMatch(from, to),
     startFace: options.startFace || "down",
     endFace: options.endFace || options.startFace || "down",
     startVisibleTo: normalizeVisibleTo(options.startVisibleTo),
@@ -1092,6 +1075,12 @@ function pushAnimation(game, from, to, card, options = {}) {
     expiresAt: Date.now() + duration
   });
   scheduleAnimationSettle(game, duration);
+}
+
+function targetsMatch(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  return a.playerIndex === b.playerIndex && a.cardIndex === b.cardIndex;
 }
 
 function scheduleAnimationSettle(game, duration) {
