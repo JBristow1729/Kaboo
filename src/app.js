@@ -103,6 +103,7 @@ function connectRelay() {
   state.relay.status = "connecting";
   const ws = new WebSocket(RELAY_URL);
   state.relay.ws = ws;
+  scheduleRelayRetry();
   ws.addEventListener("open", () => {
     state.relay.status = "connected";
     state.relay.lastError = "";
@@ -149,6 +150,15 @@ function scheduleRelayRetry() {
   state.relay.retryTimer = setTimeout(() => {
     state.relay.retryTimer = null;
     if (state.relay.status !== "connected" && Date.now() - state.relay.attemptStartedAt < RELAY_CONNECT_TIMEOUT_MS) {
+      if (state.relay.ws && state.relay.ws.readyState === WebSocket.CONNECTING) {
+        const ws = state.relay.ws;
+        state.relay.ws = null;
+        try {
+          ws.close();
+        } catch {
+          // No-op: the next poll will open a fresh socket.
+        }
+      }
       connectRelay();
       render();
     }
@@ -589,24 +599,25 @@ function RelayDialog() {
     return () => clearInterval(id);
   }, []);
   const elapsed = state.relay.attemptStartedAt ? now - state.relay.attemptStartedAt : 0;
-  const remaining = Math.max(0, Math.ceil((RELAY_CONNECT_TIMEOUT_MS - elapsed) / 1000));
+  const elapsedSeconds = Math.max(0, Math.floor(elapsed / 1000));
   const failed = state.relay.status === "failed";
-  const title = failed ? "Relay Not Connected" : "Waking Multiplayer Relay";
+  const title = failed ? "Table Not Ready" : "Setting the Table";
   const message = failed
-    ? state.relay.lastError || "The multiplayer relay could not be reached."
-    : `Trying to connect for up to ${remaining}s. Free Render services can take a short while to wake after sleeping.`;
+    ? "The multiplayer table could not be opened right now. Please try again in a moment."
+    : "Online play is waking up. This can take up to 60 seconds.";
   return h("div", { className: "modal-backdrop" },
     h("section", { className: "dialog relay-dialog" },
       h("h2", null, title),
+      !failed ? h("div", { className: "relay-table-loader", "aria-hidden": "true" },
+        h("span", { className: "relay-card relay-card-one" }),
+        h("span", { className: "relay-card relay-card-two" }),
+        h("span", { className: "relay-chip" })
+      ) : null,
+      !failed ? h("strong", { className: "relay-elapsed", "aria-live": "polite" }, `${elapsedSeconds}s`) : null,
       h("p", null, message),
-      h("div", { className: "relay-status" },
-        h("span", null, "Relay URL"),
-        h("code", null, RELAY_URL || "Not configured")
-      ),
-      h("p", { className: "hint-text" }, "Expected Render WebSocket format: wss://your-render-service.onrender.com/ws"),
       h("div", { className: "dialog-actions" },
         failed ? h("button", { className: "ghost", "data-action": "close-modal" }, "Close") : h("button", { className: "ghost", "data-action": "cancel-relay-connect" }, "Cancel"),
-        h("button", { "data-action": "retry-relay" }, failed ? "Try Again" : "Retry Now")
+        failed ? h("button", { "data-action": "retry-relay" }, "Try Again") : null
       )
     )
   );

@@ -318,23 +318,79 @@ select:focus {
 
 .relay-dialog {
   width: min(100%, 560px);
-}
-
-.relay-status {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 10px;
-  align-items: center;
-  margin: 16px 0 8px;
+  justify-items: center;
+  gap: 14px;
+  text-align: center;
 }
 
-.relay-status code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.06);
-  padding: 8px 10px;
+.relay-dialog h2,
+.relay-dialog p {
+  margin: 0;
+}
+
+.relay-dialog p {
+  max-width: 30rem;
+  color: rgba(245, 234, 209, 0.84);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.relay-table-loader {
+  position: relative;
+  width: min(220px, 66vw);
+  height: 116px;
+  border: 1px solid rgba(245, 201, 91, 0.22);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(245, 201, 91, 0.16), transparent 34%),
+    linear-gradient(135deg, rgba(16, 80, 56, 0.92), rgba(3, 22, 17, 0.96));
+  box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.36), 0 18px 34px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+
+.relay-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 64px;
+  border: 3px solid var(--cream);
+  border-radius: 6px;
+  background:
+    linear-gradient(135deg, transparent 44%, rgba(191, 47, 41, 0.88) 45%, rgba(191, 47, 41, 0.88) 55%, transparent 56%),
+    linear-gradient(45deg, transparent 44%, rgba(191, 47, 41, 0.88) 45%, rgba(191, 47, 41, 0.88) 55%, transparent 56%),
+    #f9f2df;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+}
+
+.relay-card-one {
+  animation: relay-card-one 1800ms ease-in-out infinite;
+}
+
+.relay-card-two {
+  animation: relay-card-two 1800ms ease-in-out infinite;
+}
+
+.relay-chip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 38px;
+  height: 38px;
+  border: 4px dashed rgba(245, 234, 209, 0.92);
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: inset 0 0 0 5px rgba(245, 201, 91, 0.82), 0 8px 16px rgba(0, 0, 0, 0.32);
+  animation: relay-chip-pulse 1800ms ease-in-out infinite;
+}
+
+.relay-elapsed {
+  min-width: 3rem;
+  color: var(--gold);
+  font-size: 1.5rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .hint-text {
@@ -1028,6 +1084,39 @@ select:focus {
     left: var(--from-x);
     top: var(--from-y);
     transform: translate(-50%, -50%) scale(0.96);
+  }
+}
+
+@keyframes relay-card-one {
+  0%, 100% {
+    opacity: 0.72;
+    transform: translate(-50%, -50%) rotate(-16deg) translateX(-36px);
+  }
+  50% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(-7deg) translateX(-18px) translateY(-4px);
+  }
+}
+
+@keyframes relay-card-two {
+  0%, 100% {
+    opacity: 0.72;
+    transform: translate(-50%, -50%) rotate(14deg) translateX(36px);
+  }
+  50% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(7deg) translateX(18px) translateY(-4px);
+  }
+}
+
+@keyframes relay-chip-pulse {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(0.88);
+    opacity: 0.82;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
   }
 }
 
